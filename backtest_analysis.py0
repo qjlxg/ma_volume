@@ -109,7 +109,7 @@ def run_backtest_analysis():
             # 2. 短期超卖 (RSI < 30)
             condition_rsi = backtest_signals['Calculated_RSI'] < RSI_THRESHOLD
             
-            # 3. MACD 柱开始抬升 (今天的柱子 > 昨天的柱子)
+            # 3. MACD 柱开始抬升 (今天的柱子 > 昨天的柱子) -- 【方案A的改动】
             backtest_signals['Prev_MACD_Histo'] = backtest_signals['Calculated_MACD_Histo'].shift(1)
             condition_macd = backtest_signals['Calculated_MACD_Histo'] > backtest_signals['Prev_MACD_Histo']
             # 确保 NaN 转换成 False
@@ -143,33 +143,14 @@ def run_backtest_analysis():
         except Exception as e:
             print(f"Error processing {file_path}: {e}")
 
-    # 4. 合并、计算总体成功率和盈亏指标并保存报告
+    # 4. 合并、计算总体成功率并保存
     if all_signals_data:
         final_df = pd.concat(all_signals_data, ignore_index=True)
         
-        # --- 总体统计和盈亏分析 ---
+        # --- 总体成功率计算 ---
         total_signals = len(final_df)
-        
-        # 分类信号
-        successful_signals = final_df[final_df['Return_5D'] > 0]
-        losing_signals = final_df[final_df['Return_5D'] <= 0] # 亏损或不赚不亏
-        
-        # 核心指标计算
-        successful_count = len(successful_signals)
-        losing_count = len(losing_signals)
-        total_net_return = final_df['Return_5D'].sum() # 所有收益率的总和
-        success_rate = successful_count / total_signals * 100 if total_signals > 0 else 0
-        
-        # 计算平均盈利和平均亏损
-        avg_win_return = successful_signals['Return_5D'].mean() if successful_count > 0 else 0
-        # 平均亏损取绝对值
-        avg_loss_return = losing_signals['Return_5D'].mean() * -1 if losing_count > 0 else 0 
-        
-        # 盈亏比
-        if avg_loss_return > 0:
-            profit_loss_ratio = avg_win_return / avg_loss_return
-        else:
-            profit_loss_ratio = float('inf') 
+        successful_signals = len(final_df[final_df['Return_5D'] > 0])
+        success_rate = successful_signals / total_signals * 100 if total_signals > 0 else 0
         
         # 排序
         final_df = final_df.sort_values(by=['Calculated_RSI', 'Calculated_KDJ_J'], ascending=[True, False])
@@ -182,18 +163,14 @@ def run_backtest_analysis():
         
         final_df.to_csv(output_path, index=False, encoding='utf-8')
 
-        # 打印回测报告 (更新为包含盈亏分析)
+        # 打印回测报告
         print("\n" + "="*50)
         print(f"        🎉 策略回测报告 - {HOLDING_DAYS}日持仓 🎉")
         print("="*50)
         print(f"    分析股票数量: {total_processed_stocks} 只")
         print(f"    历史信号总数: {total_signals} 个")
-        print("-" * 50)
-        print(f"    ✅ 策略成功率 (胜率): {success_rate:.2f}%")
-        print(f"    累计净收益率: {total_net_return:.2f}% (所有交易收益总和)")
-        print(f"    平均盈利 (Avg. Win): +{avg_win_return:.2f}%")
-        print(f"    平均亏损 (Avg. Loss): -{avg_loss_return:.2f}%")
-        print(f"    🎯 **盈亏比 (R-Factor)**: {profit_loss_ratio:.2f}")
+        print(f"    盈利信号数量: {successful_signals} 个")
+        print(f"    策略成功率 (胜率): {success_rate:.2f}%")
         print("="*50)
         print(f"\n✅ 详细回测结果已保存至: {output_path}")
     else:
