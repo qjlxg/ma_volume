@@ -7,29 +7,24 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
 
 # --- 常量定义 ---
-STOCK_DATA_DIR = 'stock_data'  # 确保您的CSV文件都在这个目录下
-MAX_WORKERS = 8       # 并行处理的最大线程数
-HOLD_DAYS = 30        # 持有天数
-BACKTEST_START_DATE = '2020-01-01'  # 回测起始日期
-BACKTEST_END_DATE = '2025-12-13'    # 回测结束日期
-BACKTEST_STEP_DAYS = 30             # 每隔N天运行一次筛选
+STOCK_DATA_DIR = 'stock_data'
+MAX_WORKERS = 8       
+HOLD_DAYS = 30        
+BACKTEST_START_DATE = '2020-01-01'
+BACKTEST_END_DATE = '2025-12-13'    
+BACKTEST_STEP_DAYS = 30             
 
-# --- 筛选逻辑函数 (已修复 SettingWithCopyWarning) ---
+# --- 筛选逻辑函数 (保持优化状态) ---
 def calculate_indicators(data):
-    """计算 MA5 和 MA20，并避免 SettingWithCopyWarning。"""
     if len(data) < 30:
         return pd.DataFrame()
-    df = data.copy() # 使用 .copy() 明确操作一个副本
-    
+    df = data.copy()
     df.loc[:, 'Close'] = pd.to_numeric(df['Close'], errors='coerce')
     df.loc[:, 'Volume'] = pd.to_numeric(df['Volume'], errors='coerce')
-    
     df.loc[:, 'MA5'] = df['Close'].rolling(window=5).mean()
     df.loc[:, 'MA20'] = df['Close'].rolling(window=20).mean()
-    
     return df.dropna()
 
-# ... (check_c1_golden_cross, check_c4_trend_control, select_stock_logic 保持不变)
 def check_c1_golden_cross(data):
     if len(data) < 2: return False
     d0 = data.iloc[-1]
@@ -56,7 +51,7 @@ def select_stock_logic(data):
     condition_final = check_c1_golden_cross(data) and check_c4_trend_control(data)
     return condition_final
 
-# ... (get_data_up_to_date, calculate_return 保持不变)
+# --- 回测辅助函数 (保持优化状态) ---
 def get_data_up_to_date(data, target_date):
     data = data[data['Date'] <= target_date]
     return data
@@ -95,7 +90,7 @@ def backtest_single_stock(file_path, test_dates):
         
         column_names = ['Date', 'Code', 'Open', 'Close', 'High', 'Low', 'Volume', 'Amount', 'Amplitude', 'ChangePct', 'ChangeAmt', 'Turnover']
         
-        # --- 核心修复 1：修复文件编码问题，尝试最兼容的中文编码 ---
+        # 尝试多种编码
         for encoding_type in ['utf-8', 'gb18030', 'gbk']:
             try:
                 data = pd.read_csv(
@@ -110,11 +105,9 @@ def backtest_single_stock(file_path, test_dates):
         else:
             raise UnicodeDecodeError(f"Failed to decode file {file_path} with utf-8, gb18030, or gbk. Please check file integrity.")
         
-        # --- 核心修复 2：精确指定日期格式，以提高性能和准确性 ---
-        # 严格使用您提供的格式 'YYYY-MM-DD'。
+        # 精确指定日期格式
         data.loc[:, 'Date'] = pd.to_datetime(data['Date'], format='%Y-%m-%d', errors='coerce').dt.tz_localize(None)
         data = data.dropna(subset=['Date'])
-        # ----------------------------------------------------
         
         data = data.sort_values(by='Date').reset_index(drop=True)
         
@@ -139,11 +132,12 @@ def backtest_single_stock(file_path, test_dates):
         return None
 
 def main_backtester():
-    """主回测函数。"""
+    """主回测函数 (增加日志输出)。"""
     start_time = time.time()
     shanghai_tz = pytz.timezone('Asia/Shanghai')
-    now = datetime.now(shanghai_tz)
     
+    # 1. 初始化和生成测试日期
+    print("--- 步骤 1: 初始化和生成测试日期列表 ---")
     start_date_tz = datetime.strptime(BACKTEST_START_DATE, '%Y-%m-%d').replace(tzinfo=shanghai_tz)
     end_date_tz = datetime.strptime(BACKTEST_END_DATE, '%Y-%m-%d').replace(tzinfo=shanghai_tz)
     test_dates = []
@@ -151,36 +145,54 @@ def main_backtester():
     while current_date <= end_date_tz:
         test_dates.append(current_date.replace(tzinfo=None))
         current_date += timedelta(days=BACKTEST_STEP_DAYS)
+    print(f"✅ 完成。共生成 {len(test_dates)} 个回测点。")
     
+    # 2. 检查数据目录和文件
+    print("--- 步骤 2: 查找数据文件 ---")
     if not os.path.isdir(STOCK_DATA_DIR):
         print(f"Error: Stock data directory '{STOCK_DATA_DIR}' not found. Please create it and place CSV files inside.")
         return
 
     all_files = [os.path.join(STOCK_DATA_DIR, f) for f in os.listdir(STOCK_DATA_DIR) if f.endswith('.csv') and re.match(r'\d{6}\.csv$', f)]
     if not all_files:
-        print(f"No stock data CSV files found in '{STOCK_DATA_DIR}'.")
+        print(f"Error: No stock data CSV files found in '{STOCK_DATA_DIR}'.")
         return
 
-    print(f"Found {len(all_files)} files. Starting parallel backtesting with {MAX_WORKERS} workers...")
-    print(f"Testing {len(test_dates)} dates from {BACKTEST_START_DATE} to {BACKTEST_END_DATE}.")
-
+    print(f"✅ 完成。找到 {len(all_files)} 个股票文件。")
+    
+    # 3. 执行并行回测
+    print(f"--- 步骤 3: 启动并行回测 (使用 {MAX_WORKERS} 个线程) ---")
+    print("🚀 预计耗时较长，请等待第一个结果或异常输出...")
     all_results = []
+    
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         future_to_file = {executor.submit(backtest_single_stock, file, test_dates): file for file in all_files}
         
+        # 使用进度计数器
+        processed_count = 0
+        total_files = len(all_files)
+        
         for future in as_completed(future_to_file):
             file_path = future_to_file[future]
+            processed_count += 1
+            
             try:
                 results = future.result()
                 if results:
                     all_results.extend(results)
+                    print(f"🎉 成功回测 {file_path} 并发现 {len(results)} 个信号。({processed_count}/{total_files})")
+                # else:
+                #     print(f"✅ 完成回测 {file_path}，未发现信号。({processed_count}/{total_files})")
             except Exception as exc:
-                print(f'{file_path} generated an unexpected exception: {exc}')
+                print(f'❌ 错误: {file_path} 产生异常: {exc} ({processed_count}/{total_files})')
 
+    # 4. 汇总和输出结果
+    print("\n--- 步骤 4: 汇总结果 ---")
     if not all_results:
-        print("\nNo backtest signals found leading to trades.")
+        print("未发现任何符合策略的交易信号。")
         return
 
+    # ... (结果处理和打印，保持不变)
     results_df = pd.DataFrame(all_results)
     
     total_trades = len(results_df)
@@ -190,6 +202,7 @@ def main_backtester():
     end_time = time.time()
     run_time = end_time - start_time
     
+    now = datetime.now(shanghai_tz)
     output_dir = now.strftime('%Y/%m')
     os.makedirs(output_dir, exist_ok=True)
     timestamp_str = now.strftime('%Y%m%d_%H%M%S')
