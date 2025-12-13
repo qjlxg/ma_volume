@@ -21,7 +21,7 @@ on:
   workflow_dispatch:
     
 env:
-  # 设置时区为上海，确保定时和日志时间正确
+  # 设置时区为上海 (Asia/Shanghai)
   TZ: Asia/Shanghai
 
 jobs:
@@ -58,7 +58,7 @@ jobs:
         # 执行回测脚本。脚本自带的 print 语句将输出摘要到日志。
         python backtest_screener.py
         
-    - name: 总结回测结果到 Actions 日志 (使用脚本自带的打印内容)
+    - name: 总结回测结果到 Actions 日志
       if: success()
       run: |
         RESULTS_FILE=$(ls backtest_results/*.csv | head -n 1)
