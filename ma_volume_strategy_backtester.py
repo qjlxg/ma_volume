@@ -7,24 +7,26 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
 import sys
 
-# --- 常量定义：针对测试效率和精确度优化 ---
+# --- 常量定义：保持高效和精确 ---
 STOCK_DATA_DIR = 'stock_data'
-MAX_STOCK_COUNT = 50     # 限制回测的股票文件数量
-MAX_WORKERS = 4           # 保持 4 个线程，适应 GitHub CI/CD 环境
-HOLD_DAYS = 30            # 持有天数
+MAX_STOCK_COUNT = 50      # 限制回测的股票文件数量为 50
+MAX_WORKERS = 4           # 保持 4 个线程
+HOLD_DAYS = 30            
 BACKTEST_START_DATE = '2020-01-01'
 BACKTEST_END_DATE = '2025-12-13'    
-BACKTEST_STEP_DAYS = 1    # 每日回测，确保回测精确性
+BACKTEST_STEP_DAYS = 1    # 每日回测
 
-# --- 筛选逻辑函数 (保持不变，已修复 Pandas 警告) ---
+# --- 筛选逻辑函数 (已更新：计算 VMA20) ---
 def calculate_indicators(data):
-    """计算所需的均线（MA）和成交量指标。"""
+    """计算所需的均线（MA）和成交量均线（VMA）。"""
     if len(data) < 30: return pd.DataFrame()
     df = data.copy()
     df.loc[:, 'Close'] = pd.to_numeric(df['Close'], errors='coerce')
     df.loc[:, 'Volume'] = pd.to_numeric(df['Volume'], errors='coerce')
     df.loc[:, 'MA5'] = df['Close'].rolling(window=5).mean()
     df.loc[:, 'MA20'] = df['Close'].rolling(window=20).mean()
+    # 新增：计算 20 日平均成交量 (VMA20)
+    df.loc[:, 'VMA20'] = df['Volume'].rolling(window=20).mean()
     return df.dropna()
 
 def check_c1_golden_cross(data):
@@ -48,17 +50,29 @@ def check_c4_trend_control(data, max_drawdown=0.15, max_days=30):
     is_drawdown_controlled = drawdown <= max_drawdown
     return is_ma20_up and is_drawdown_controlled
 
+def check_c5_volume_filter(data):
+    """检查成交量是否大于过去20日均量 (VMA20)，实现放量过滤。"""
+    if data.empty: return False
+    d0 = data.iloc[-1]
+    # 要求当日成交量大于 20 日平均成交量
+    return d0['Volume'] > d0['VMA20']
+
 def select_stock_logic(data):
-    """组合策略逻辑。"""
+    """组合策略逻辑 (金叉 + 趋势/回撤 + 成交量放大)。"""
     data = calculate_indicators(data)
     if data.empty: return False
     data = data.sort_values(by='Date').reset_index(drop=True) 
-    condition_final = check_c1_golden_cross(data) and check_c4_trend_control(data)
+    
+    c1 = check_c1_golden_cross(data)
+    c4 = check_c4_trend_control(data)
+    # 新增条件 C5
+    c5 = check_c5_volume_filter(data)
+    
+    condition_final = c1 and c4 and c5 # 所有条件必须同时满足
     return condition_final
 
-# --- 回测及止损逻辑 (已包含 MA20 止损) ---
+# --- 回测及止损逻辑 (保持不变) ---
 def get_data_up_to_date(data, target_date):
-    """获取截止到目标日期的数据。"""
     data = data[data['Date'] <= target_date]
     return data
 
@@ -79,31 +93,25 @@ def calculate_return(data, buy_date, hold_days, stop_loss_ma=20):
 
     sell_date_target = buy_date_actual + timedelta(days=hold_days)
     
-    # 获取买入日到目标卖出日期间的完整数据，用于计算 MA20
     full_data_for_ma = data[data['Date'] <= sell_date_target].sort_values(by='Date')
     
     if len(full_data_for_ma) < stop_loss_ma:
         return None 
 
-    # 计算 MA20 止损线
     full_data_for_ma.loc[:, 'MA20_SL'] = full_data_for_ma['Close'].rolling(window=stop_loss_ma).mean()
     future_data_with_ma = full_data_for_ma[full_data_for_ma['Date'] > buy_date_actual].reset_index(drop=True)
     
     if future_data_with_ma.empty: 
-        # 如果买入日后没有更多数据，但满足条件，则视为信号无效
         return None
     
-    # 检查是否有止损点：收盘价低于 MA20
     stop_loss_trigger = future_data_with_ma[future_data_with_ma['Close'] < future_data_with_ma['MA20_SL']]
     
     if not stop_loss_trigger.empty:
-        # 发生止损
         stop_loss_day = stop_loss_trigger.iloc[0]
         sell_price = stop_loss_day['Close']
         sell_date = stop_loss_day['Date']
         return (sell_price - buy_price) / buy_price, sell_date
     
-    # 如果未触发止损，则在持有期结束时卖出
     sell_price = future_data_with_ma['Close'].iloc[-1]
     return (sell_price - buy_price) / buy_price, sell_date_target
 
@@ -117,7 +125,6 @@ def backtest_single_stock(file_path, test_dates):
         
         column_names = ['Date', 'Code', 'Open', 'Close', 'High', 'Low', 'Volume', 'Amount', 'Amplitude', 'ChangePct', 'ChangeAmt', 'Turnover']
         
-        # 尝试多种编码
         for encoding_type in ['utf-8', 'gb18030', 'gbk']:
             try:
                 data = pd.read_csv(file_path, header=0, names=column_names, encoding=encoding_type)
@@ -129,7 +136,6 @@ def backtest_single_stock(file_path, test_dates):
         
         data.loc[:, 'Date'] = pd.to_datetime(data['Date'], format='%Y-%m-%d', errors='coerce').dt.tz_localize(None)
         data = data.dropna(subset=['Date'])
-        
         data = data.sort_values(by='Date').reset_index(drop=True)
         
         results = []
@@ -154,7 +160,6 @@ def main_backtester():
     start_time = time.time()
     shanghai_tz = pytz.timezone('Asia/Shanghai')
     
-    # 强制在初始化后立即打印，便于发现问题
     print(f"--- 启动回测程序 (当前时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}) ---")
     
     # 1. 初始化和生成测试日期
@@ -174,7 +179,6 @@ def main_backtester():
         print(f"Error: Stock data directory '{STOCK_DATA_DIR}' not found.")
         return
 
-    # I/O 优化点：使用 os.scandir 
     all_files_full = []
     try:
         for entry in os.scandir(STOCK_DATA_DIR):
@@ -188,7 +192,6 @@ def main_backtester():
         print(f"Error: No stock data CSV files found in '{STOCK_DATA_DIR}'.")
         return
 
-    # 限制股票数量
     all_files = all_files_full[:MAX_STOCK_COUNT]
     
     print(f"✅ 完成。找到 {len(all_files_full)} 个股票文件。本次仅回测前 {len(all_files)} 个文件。")
@@ -214,11 +217,10 @@ def main_backtester():
                 file_path = future_to_file[future]
                 print(f'❌ 线程错误: {file_path} 产生异常: {exc} ({processed_count}/{total_files})')
             
-            # 每处理 20 个文件打印一次进度
-            if processed_count % 20 == 0:
+            if processed_count % 10 == 0:
                 print(f"⏳ 进度: 已处理 {processed_count}/{total_files} 个文件...")
         
-        if total_files % 20 != 0 and processed_count == total_files:
+        if total_files % 10 != 0 and processed_count == total_files:
              print(f"⏳ 进度: 已处理 {processed_count}/{total_files} 个文件...")
 
 
@@ -241,7 +243,8 @@ def main_backtester():
     output_dir = now.strftime('%Y/%m')
     os.makedirs(output_dir, exist_ok=True)
     timestamp_str = now.strftime('%Y%m%d_%H%M%S')
-    output_filename = f"backtest_results_100_daily_{timestamp_str}.csv"
+    # 输出文件名包含 volume 过滤标记
+    output_filename = f"backtest_results_50_daily_volume_{timestamp_str}.csv"
     output_path = os.path.join(output_dir, output_filename)
     
     results_df[['code', 'buy_date', 'sell_date', 'return']].to_csv(output_path, index=False, encoding='utf-8')
@@ -249,7 +252,7 @@ def main_backtester():
     print("\n" + "="*50)
     print("📈 回测完成")
     print(f"回测范围: **前 {MAX_STOCK_COUNT} 只股票**")
-    print(f"回测类型: 每日精确回测 (步长 {BACKTEST_STEP_DAYS} 天)")
+    print(f"回测类型: 每日精确回测 (步长 {BACKTEST_STEP_DAYS} 天 + 成交量过滤)")
     print(f"总交易次数 (信号数量): {total_trades}")
     print(f"平均回报率: {avg_return:.2%}")
     print(f"胜率 (回报率 > 0): {win_rate:.2%}")
@@ -258,6 +261,5 @@ def main_backtester():
     print("="*50)
 
 if __name__ == '__main__':
-    # 强制刷新 stdout 缓冲区，解决 CI/CD 日志延迟问题
     sys.stdout.reconfigure(line_buffering=True)
     main_backtester()
