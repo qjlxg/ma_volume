@@ -1,10 +1,6 @@
-name: MA Volume Strategy Backtest and Screener
+name: MA Volume Strategy Backtest
 
-# 触发条件
 on:
-  # 允许手动从 GitHub Actions 界面运行
-  workflow_dispatch:
-  # 当以下文件被推送(Push)到 main 分支时自动运行
   push:
     branches:
       - main
@@ -12,76 +8,36 @@ on:
       - 'ma_volume_strategy.py'
       - 'ma_volume_strategy_backtester.py'
       - '.github/workflows/ma_volume_strategy_backtest.yml'
+  workflow_dispatch:  # 支持手动触发
 
 jobs:
-  run_screener_and_push_results:
+  backtest:
     runs-on: ubuntu-latest
-    
-    # 使用 GitHub 提供的 GITHUB_TOKEN，这允许我们向仓库推送数据
-    permissions:
-      contents: write 
-      
     env:
-      PYTHON_VERSION: '3.10'
-      # 设置时区环境变量，方便在日志中确认
-      TZ: 'Asia/Shanghai'
-      
-    steps:
-      - name: 1. Checkout repository
-        uses: actions/checkout@v4
-        # 必须开启 fetch-depth: 0 才能在后续提交时保留完整的 Git 历史
-        with:
-          fetch-depth: 0 
+      TZ: Asia/Shanghai  # 设置上海时区
 
-      - name: 2. Set up Python ${{ env.PYTHON_VERSION }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          
-      - name: 3. Install dependencies (pandas, pytz)
+          python-version: '3.12'
+
+      - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
           pip install pandas pytz
-          
-      - name: 4. Verify Data and Log Timezone
-        run: |
-          echo "Starting workflow. Timezone is set to: $TZ"
-          if [ ! -d "stock_data" ] || [ ! -f "stock_names.csv" ]; then
-            echo "::error:: Missing 'stock_data' directory or 'stock_names.csv'. Please ensure data is present."
-            exit 1
-          fi
 
-      - name: 5. 🏃 Run Backtest Script
+      - name: Run backtest script
         run: python ma_volume_strategy_backtester.py
-        
-      - name: 6. 🚀 Run Stock Screener Script (Generates Result CSV)
-        run: python ma_volume_strategy.py
-        
-      - name: 7. 📤 Commit and Push Results to Repository
-        run: |
-          # 配置 Git 用户信息
-          git config user.name 'github-actions[bot]'
-          git config user.email 'github-actions[bot]@users.noreply.github.com'
 
-          # 添加所有新生成的结果文件 (通常在 /YYYY/MM/ 目录下)
-          git add .
-          
-          # 检查是否有文件变动
-          if git status --porcelain | grep -q '??' || git status --porcelain | grep -q 'M'; then
-            echo "New result files found. Committing..."
-            # 获取最新生成的 CSV 文件路径，用于 commit message
-            LATEST_RESULT=$(find . -path "*/screener_*.csv" -print0 | xargs -0 ls -t | head -1)
-            
-            # 提交变动
-            if [ -n "$LATEST_RESULT" ]; then
-                git commit -m "Automated: New Screener Results from GitHub Actions. Latest: $(basename $LATEST_RESULT)"
-            else
-                git commit -m "Automated: New Screener and Backtest run."
-            fi
-            
-            # 推送到仓库
-            git push
-            echo "Successfully pushed new results to the repository."
-          else
-            echo "No new results or changes to commit."
-          fi
+      - name: Commit and push results
+        run: |
+          git config --global user.name "GitHub Actions"
+          git config --global user.email "actions@github.com"
+          git add -A  # 添加所有变化（包括新生成的CSV文件）
+          git commit -m "Auto-commit backtest results from ${{ github.sha }}" || echo "No changes to commit"
+          git push origin main
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}  # 使用默认token
