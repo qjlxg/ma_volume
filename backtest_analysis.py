@@ -5,16 +5,16 @@ from datetime import datetime, timedelta, timezone
 from ta.momentum import RSIIndicator, StochasticOscillator
 from ta.trend import SMAIndicator, MACD
 
-# --- 配置 ---
+# --- 配置 (已优化) ---
 STOCK_DATA_DIR = 'stock_data'
 OUTPUT_DIR_BASE = 'backtest_results'
-RSI_THRESHOLD = 30
+RSI_THRESHOLD = 25  # *** 优化点 1: RSI 阈值从 30 收紧至 25 ***
 RSI_PERIOD = 14
 MA_PERIOD = 200
 PRICE_COLUMN = '收盘'
 HIGH_COL = '最高'
 LOW_COL = '最低'
-HOLDING_DAYS = 5 # 默认回测持仓天数
+HOLDING_DAYS = 5 
 # ---
 
 # 定义输出结果的中文列名映射表 (增加了回测结果列)
@@ -26,7 +26,7 @@ OUTPUT_COLUMNS_MAPPING = {
     'Calculated_MA200': f'MA({MA_PERIOD}日)',
     'Calculated_MACD_Histo': 'MACD柱',
     'Calculated_KDJ_J': 'KDJ_J值',
-    'Return_5D': f'未来{HOLDING_DAYS}日收益率(%)', # 新增的回测指标
+    'Return_5D': f'未来{HOLDING_DAYS}日收益率(%)', 
     '振幅': '振幅',
     '涨跌幅': '涨跌幅',
     '换手率': '换手率'
@@ -49,13 +49,13 @@ def run_backtest_analysis():
     timestamp = now_shanghai.strftime('%Y%m%d_%H%M%S')
     year_month_dir = now_shanghai.strftime('%Y/%m')
     output_sub_dir = os.path.join(OUTPUT_DIR_BASE, year_month_dir)
-    output_filename = f"{timestamp}_BACKTEST_REPORT_{HOLDING_DAYS}D_MACD_RISING.csv" 
+    output_filename = f"{timestamp}_BACKTEST_REPORT_{HOLDING_DAYS}D_RSI{RSI_THRESHOLD}_MACD_STRICT.csv" # 更改文件名以体现优化
     output_path = os.path.join(output_sub_dir, output_filename)
     
     os.makedirs(output_sub_dir, exist_ok=True)
     all_signals_data = []
     
-    print(f"Starting backtest analysis on directory: {STOCK_DATA_DIR}")
+    print(f"Starting backtest analysis with RSI < {RSI_THRESHOLD} and strict MACD filter.")
     total_processed_stocks = 0
     
     for file_path in glob.glob(os.path.join(STOCK_DATA_DIR, '*.csv')):
@@ -65,7 +65,7 @@ def run_backtest_analysis():
             # 检查所有必需的中文列是否存在
             required_cols = {PRICE_COLUMN, HIGH_COL, LOW_COL, '日期'}
             if not required_cols.issubset(df.columns):
-                print(f" - Skipping {file_path}: Missing required columns.")
+                # print(f" - Skipping {file_path}: Missing required columns.")
                 continue
             
             total_processed_stocks += 1
@@ -95,30 +95,33 @@ def run_backtest_analysis():
             df_temp['Calculated_KDJ_J'] = 3 * df_temp['Calculated_KDJ_K'] - 2 * df_temp['Calculated_KDJ_D']
             
             # --- 步骤 2: 回测收益计算 ---
-            # 计算 HOLDING_DAYS 个交易日后的收盘价
             df_temp[f'Future_{HOLDING_DAYS}D_Close'] = df_temp['Close_Price'].shift(-HOLDING_DAYS)
-            # 计算 5 日收益率 (假设在信号日收盘买入，5日后收盘卖出)
             df_temp['Return_5D'] = (df_temp[f'Future_{HOLDING_DAYS}D_Close'] / df_temp['Close_Price'] - 1) * 100
             
-            # --- 步骤 3: 筛选所有历史信号 ---
+            # --- 步骤 3: 筛选所有历史信号 (引入严格条件) ---
             backtest_signals = df_temp.copy()
             
             # 1. 长期趋势向上 (收盘价 > MA200)
             condition_ma = backtest_signals['Close_Price'] > backtest_signals['Calculated_MA200']
             
-            # 2. 短期超卖 (RSI < 30)
+            # 2. 短期极端超卖 (RSI < 25)
             condition_rsi = backtest_signals['Calculated_RSI'] < RSI_THRESHOLD
             
             # 3. MACD 柱开始抬升 (今天的柱子 > 昨天的柱子)
             backtest_signals['Prev_MACD_Histo'] = backtest_signals['Calculated_MACD_Histo'].shift(1)
-            condition_macd = backtest_signals['Calculated_MACD_Histo'] > backtest_signals['Prev_MACD_Histo']
-            # 确保 NaN 转换成 False
-            condition_macd = condition_macd.fillna(False) 
+            condition_macd_rising = backtest_signals['Calculated_MACD_Histo'] > backtest_signals['Prev_MACD_Histo']
             
+            # *** 优化点 2: 严格要求 MACD 柱在负值区域抬升 (空头衰竭) ***
+            condition_macd_negative = backtest_signals['Prev_MACD_Histo'] < 0
+
             # 4. KDJ J值 > K值 (短期反弹力度)
             condition_kdj = backtest_signals['Calculated_KDJ_J'] > backtest_signals['Calculated_KDJ_K']
             
-            final_filter = condition_ma & condition_rsi & condition_macd & condition_kdj
+            # 最终筛选逻辑合并 (增加了 condition_macd_negative)
+            final_filter = condition_ma & condition_rsi & condition_macd_rising & condition_macd_negative & condition_kdj
+
+            # 确保 NaN 转换成 False
+            final_filter = final_filter.fillna(False) 
 
             filtered_df_temp = backtest_signals[final_filter].copy()
             
@@ -152,12 +155,12 @@ def run_backtest_analysis():
         
         # 分类信号
         successful_signals = final_df[final_df['Return_5D'] > 0]
-        losing_signals = final_df[final_df['Return_5D'] <= 0] # 亏损或不赚不亏
+        losing_signals = final_df[final_df['Return_5D'] <= 0] 
         
         # 核心指标计算
         successful_count = len(successful_signals)
         losing_count = len(losing_signals)
-        total_net_return = final_df['Return_5D'].sum() # 所有收益率的总和
+        total_net_return = final_df['Return_5D'].sum()
         success_rate = successful_count / total_signals * 100 if total_signals > 0 else 0
         
         # 计算平均盈利和平均亏损
@@ -184,7 +187,8 @@ def run_backtest_analysis():
 
         # 打印回测报告 (更新为包含盈亏分析)
         print("\n" + "="*50)
-        print(f"        🎉 策略回测报告 - {HOLDING_DAYS}日持仓 🎉")
+        print(f"        🎉 策略回测报告 - {HOLDING_DAYS}日持仓 (优化版) 🎉")
+        print(f"    *** 筛选条件: RSI < {RSI_THRESHOLD} 且 MACD负值区域抬升 ***")
         print("="*50)
         print(f"    分析股票数量: {total_processed_stocks} 只")
         print(f"    历史信号总数: {total_signals} 个")
@@ -197,7 +201,8 @@ def run_backtest_analysis():
         print("="*50)
         print(f"\n✅ 详细回测结果已保存至: {output_path}")
     else:
-        print(f"\n⚠️ 未发现任何符合回测条件的信号。")
+        print(f"\n⚠️ 未发现任何符合优化后回测条件的信号。")
 
 if __name__ == "__main__":
     run_backtest_analysis()
+
