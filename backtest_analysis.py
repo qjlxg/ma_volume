@@ -9,15 +9,15 @@ import numpy as np
 # --- 配置 (最终优化版) ---
 STOCK_DATA_DIR = 'stock_data'
 OUTPUT_DIR_BASE = 'backtest_results'
-RSI_THRESHOLD = 25              # 维持 RSI < 25
+RSI_THRESHOLD = 25              # 优化：RSI < 25 (极端超卖)
 RSI_PERIOD = 14
 MA_PERIOD = 200
 PRICE_COLUMN = '收盘'
 HIGH_COL = '最高'
 LOW_COL = '最低'
 HOLDING_DAYS = 5 
-# *** 新增实战交易成本 ***
-TRANSACTION_COST = 0.2          # 双向交易成本 (买入+卖出)，假设为 0.2%
+# *** 引入实战交易成本 ***
+TRANSACTION_COST = 0.2          # 双向交易成本 (买入+卖出)，0.2%
 # ---
 
 # 定义输出结果的中文列名映射表 
@@ -29,14 +29,14 @@ OUTPUT_COLUMNS_MAPPING = {
     'Calculated_MA200': f'MA({MA_PERIOD}日)',
     'Calculated_MACD_Histo': 'MACD柱',
     'Calculated_KDJ_J': 'KDJ_J值',
-    'Return_5D': f'未来{HOLDING_DAYS}日净收益率(%)', # 更改名称体现净收益
+    'Return_5D': f'未来{HOLDING_DAYS}日净收益率(%)', 
     '振幅': '振幅',
     '涨跌幅': '涨跌幅',
     '换手率': '换手率'
 }
 INDICATOR_COLS = ['Calculated_RSI', 'Calculated_MA200', 'Calculated_MACD_Histo', 'Calculated_KDJ_J']
 
-# (其他辅助函数，如 convert_to_shanghai_time 保持不变)
+
 def convert_to_shanghai_time(dt_utc):
     """将 UTC 时间转换为上海时间 (UTC+8)"""
     utc_tz = timezone.utc
@@ -52,17 +52,29 @@ def run_backtest_analysis():
     timestamp = now_shanghai.strftime('%Y%m%d_%H%M%S')
     year_month_dir = now_shanghai.strftime('%Y/%m')
     output_sub_dir = os.path.join(OUTPUT_DIR_BASE, year_month_dir)
-    # 更改文件名以体现成本扣除
-    output_filename = f"{timestamp}_BACKTEST_REPORT_{HOLDING_DAYS}D_COST{TRANSACTION_COST}%.csv" 
+    # 更改文件名以体现A股过滤和成本扣除
+    output_filename = f"{timestamp}_BACKTEST_REPORT_A股_COST{TRANSACTION_COST}%.csv" 
     output_path = os.path.join(output_sub_dir, output_filename)
     
     os.makedirs(output_sub_dir, exist_ok=True)
     all_signals_data = []
     
     print(f"Starting backtest analysis with fixed 5D holding and Cost: {TRANSACTION_COST}%.")
+    print("Applying A-share filter (code starts with 60, 68, 00, or 30).")
     total_processed_stocks = 0
+    total_scanned_stocks = 0
     
     for file_path in glob.glob(os.path.join(STOCK_DATA_DIR, '*.csv')):
+        
+        stock_code = os.path.basename(file_path).replace('.csv', '')
+        total_scanned_stocks += 1
+        
+        # *** 新增：沪深A股过滤逻辑 ***
+        if not (stock_code.startswith('60') or stock_code.startswith('68') or \
+                stock_code.startswith('00') or stock_code.startswith('30')):
+            # print(f" - Skipping {stock_code}: Not a recognized A-share code.")
+            continue
+            
         try:
             df = pd.read_csv(file_path)
             
@@ -108,15 +120,20 @@ def run_backtest_analysis():
             # --- 步骤 3: 筛选所有历史信号 (RSI<25 & MACD负值抬升) ---
             backtest_signals = df_temp.copy()
             
+            # 1. 长期趋势向上 (收盘价 > MA200)
             condition_ma = backtest_signals['Close_Price'] > backtest_signals['Calculated_MA200']
-            condition_rsi = backtest_signals['Calculated_RSI'] < RSI_THRESHOLD # RSI < 25
+            # 2. 短期极端超卖 (RSI < 25)
+            condition_rsi = backtest_signals['Calculated_RSI'] < RSI_THRESHOLD 
             
+            # 3. MACD 柱开始抬升 & 必须在负值区域 (空头衰竭)
             backtest_signals['Prev_MACD_Histo'] = backtest_signals['Calculated_MACD_Histo'].shift(1)
             condition_macd_rising = backtest_signals['Calculated_MACD_Histo'] > backtest_signals['Prev_MACD_Histo']
-            condition_macd_negative = backtest_signals['Prev_MACD_Histo'] < 0 # MACD 负值抬升
+            condition_macd_negative = backtest_signals['Prev_MACD_Histo'] < 0 
 
+            # 4. KDJ J值 > K值 (短期反弹力度)
             condition_kdj = backtest_signals['Calculated_KDJ_J'] > backtest_signals['Calculated_KDJ_K']
             
+            # 最终筛选逻辑合并
             final_filter = condition_ma & condition_rsi & condition_macd_rising & condition_macd_negative & condition_kdj
 
             final_filter = final_filter.fillna(False) 
@@ -134,7 +151,6 @@ def run_backtest_analysis():
                         filtered_df[col] = filtered_df_temp[col]
                     filtered_df['Return_5D'] = filtered_df_temp['Return_5D']
                         
-                    stock_code = os.path.basename(file_path).replace('.csv', '')
                     filtered_df.insert(0, 'StockCode', stock_code)
                     all_signals_data.append(filtered_df)
                     print(f" - Found {len(filtered_df)} historical signals for {stock_code}")
@@ -177,10 +193,10 @@ def run_backtest_analysis():
 
         # 打印回测报告 
         print("\n" + "="*50)
-        print(f"        🎉 策略回测报告 - 5日持仓 (最终净收益版) 🎉")
+        print(f"        🎉 策略回测报告 - 5日持仓 (沪深A股净收益版) 🎉")
         print(f"    *** 交易成本扣除: {TRANSACTION_COST}% ***")
         print("="*50)
-        print(f"    分析股票数量: {total_processed_stocks} 只")
+        print(f"    分析股票数量: {total_scanned_stocks} 只 (其中 {total_processed_stocks} 只为沪深A股)")
         print(f"    历史信号总数: {total_signals} 个")
         print("-" * 50)
         print(f"    ✅ 策略成功率 (净胜率): {success_rate:.2f}%")
@@ -195,4 +211,3 @@ def run_backtest_analysis():
 
 if __name__ == "__main__":
     run_backtest_analysis()
-
