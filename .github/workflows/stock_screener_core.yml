@@ -1,0 +1,69 @@
+name: 📈 模式1/2 
+
+on:
+  # 1. 手动触发
+  workflow_dispatch:
+  
+  # 2. 脚本或 YAML 文件变动时自动触发
+  push:
+    paths:
+      - 'stock_screener_core.py'
+      - '.github/workflows/stock_screener_core.yml'
+  
+  # 3. 每天定时触发 (北京时间/上海时间 18:00)
+  schedule:
+    - cron: '0 10 * * *'
+
+jobs:
+  run_screener:
+    runs-on: ubuntu-latest
+    
+    # 设置时区为上海 (北京时间)
+    env:
+      TZ: Asia/Shanghai
+
+    steps:
+    - name: 1. 检出代码 (Checkout Repository)
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: 2. 设置 Python 环境 (Setup Python)
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.x'
+
+    - name: 3. 安装依赖 (Install Dependencies)
+      run: |
+        python -m pip install --upgrade pip
+        pip install pandas numpy
+
+    - name: 4. 运行股票筛选脚本 (Run Screener - 包含并行处理)
+      run: python stock_screener_core.py
+      
+    - name: 5. 检查并推送筛选结果 (Commit and Push Results)
+      id: commit
+      run: |
+        # 配置 Git
+        git config --global user.name 'GitHub Actions Screener'
+        git config --global user.email 'actions@github.com'
+        
+        # 检查是否有新的 CSV 文件生成
+        if git status --porcelain | grep 'screened_results/'; then
+          echo "Found new results. Proceeding to commit."
+          git add screened_results/
+          
+          # 使用系统环境变量 TZ 获取准确的上海时间用于 Commit 消息
+          TIMESTAMP=$(date +'%Y-%m-%d %H:%M:%S')
+          git commit -m "📈 Auto: Add stock screening results for ${TIMESTAMP} (Shanghai Time)"
+          
+          # ** FIX: 拉取远程更新并变基（rebase），解决冲突 **
+          # ${{ github.ref_name }} 是当前分支的名称
+          git pull --rebase origin ${{ github.ref_name }}
+          
+          # 推送到仓库
+          git push
+        else
+          echo "No new screening results found. Skipping commit."
+        fi
+      if: success()
