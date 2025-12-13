@@ -10,7 +10,7 @@ import sys
 # --- 常量定义：恢复 MA20 趋势，加入 RSI 过滤 ---
 STOCK_DATA_DIR = 'stock_data'
 MAX_STOCK_COUNT = 25      # 保持 25 只股票，进行极速回测
-MAX_WORKERS = 4           
+MAX_WORKERS = 8           
 HOLD_DAYS = 30            # H=30
 BACKTEST_START_DATE = '2020-01-01'
 BACKTEST_END_DATE = '2025-12-13'    
