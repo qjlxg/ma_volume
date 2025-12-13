@@ -1,0 +1,84 @@
+name: Stock Screener & Push Results
+
+# 定义触发条件
+on:
+  # 1. 每天定时触发（北京时间 18:00 是 UTC 10:00）
+  schedule:
+    - cron: '0 10 * * *' 
+  
+  # 2. 手动触发
+  workflow_dispatch:
+  
+  # 3. 当脚本或yml文件变动时触发
+  push:
+    branches:
+      - main  # 假设主分支是 main
+      - master # 兼容 master 分支
+    paths:
+      - 'ma_volume_strategy.py'  # <--- 已修改的文件名
+      - '.github/workflows/ma_volume_strategy.yml'
+
+jobs:
+  run_screener_and_push:
+    runs-on: ubuntu-latest
+    
+    # 设置时区，确保脚本内部的时间戳是上海时间
+    env:
+      TZ: Asia/Shanghai
+
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+      with:
+        # 必须深度拉取，因为我们需要推送结果
+        fetch-depth: 0 
+        # 使用GITHUB_TOKEN来允许后续的推送操作
+        token: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.x'
+
+    - name: Install Python dependencies
+      run: |
+        echo "Installing Python dependencies..."
+        pip install pandas pytz
+        
+    - name: Create Stock Data Directory (If missing)
+      run: |
+        mkdir -p stock_data
+
+    - name: Run Stock Screener
+      run: |
+        echo "Starting stock screener..."
+        python ma_volume_strategy.py  # <--- 已修改的脚本调用
+        
+    - name: Commit and Push Results
+      # 使用 Git 命令块处理提交和推送
+      run: |
+        echo "Checking for new results..."
+        
+        # 检查是否有文件更改 (新的结果文件)
+        if [[ $(git status --porcelain) ]]; then
+            
+            echo "New results found. Committing and pushing to repository..."
+
+            # 配置Git用户信息
+            git config --global user.name "github-actions[bot]"
+            git config --global user.email "github-actions[bot]@users.noreply.github.com"
+            
+            # 添加所有新创建的目录和文件
+            git add . 
+
+            # 提交更改
+            COMMIT_MSG="[AUTO] New stock screen results for $(date +'%Y-%m-%d %H:%M:%S')"
+            git commit -m "$COMMIT_MSG"
+            
+            # 推送更改到远程仓库
+            git push
+
+            echo "Successfully pushed new results."
+        else
+            echo "No new results found or no changes made. Nothing to commit."
+        fi
