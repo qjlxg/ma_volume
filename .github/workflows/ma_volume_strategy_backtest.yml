@@ -1,0 +1,72 @@
+name: MA/Volume Strategy Backtester
+
+on:
+  # 1. 每周一执行一次回测 (UTC 10:00, 相当于北京时间 18:00)
+  schedule:
+    - cron: '0 10 * * 1' 
+  
+  # 2. 允许手动触发回测
+  workflow_dispatch:
+  
+  # 3. 当回测或策略脚本变动时触发
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - 'ma_volume_strategy_backtester.py' # <--- 名称已更新
+      - 'ma_volume_strategy.py'            # 策略逻辑是回测的基础
+      - '.github/workflows/ma_volume_strategy_backtest.yml' # <--- 名称已更新
+
+jobs:
+  run_strategy_backtest:
+    runs-on: ubuntu-latest
+    
+    env:
+      TZ: Asia/Shanghai
+
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0 
+        token: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.x'
+
+    - name: Install Python dependencies
+      run: |
+        echo "Installing Python dependencies..."
+        pip install pandas numpy pytz
+        
+    - name: Run Strategy Backtest
+      run: |
+        echo "Starting backtest..."
+        python ma_volume_strategy_backtester.py 
+
+    - name: Commit and Push Backtest Results
+      run: |
+        echo "Checking for new backtest results..."
+        
+        # 检查 backtest_results 目录是否有新文件
+        if [[ $(git status --porcelain backtest_results) ]]; then
+            
+            echo "New backtest results found. Committing and pushing..."
+
+            git config --global user.name "github-actions[bot]"
+            git config --global user.email "github-actions[bot]@users.noreply.github.com"
+            
+            git add backtest_results 
+
+            COMMIT_MSG="[BACKTEST] Strategy performance update: $(date +'%Y-%m-%d')"
+            git commit -m "$COMMIT_MSG"
+            
+            git push
+
+            echo "Successfully pushed backtest results."
+        else
+            echo "No new results found or no changes made. Nothing to commit."
+        fi
