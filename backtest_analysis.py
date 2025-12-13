@@ -6,19 +6,18 @@ from ta.momentum import RSIIndicator, StochasticOscillator
 from ta.trend import SMAIndicator, MACD
 import numpy as np
 
-# --- 配置 (引入风控参数) ---
+# --- 配置 (最终优化版) ---
 STOCK_DATA_DIR = 'stock_data'
 OUTPUT_DIR_BASE = 'backtest_results'
-RSI_THRESHOLD = 25 # 优化后的阈值
+RSI_THRESHOLD = 25              # 维持 RSI < 25
 RSI_PERIOD = 14
 MA_PERIOD = 200
 PRICE_COLUMN = '收盘'
 HIGH_COL = '最高'
 LOW_COL = '最低'
 HOLDING_DAYS = 5 
-# *** 新增风控参数 ***
-STOP_LOSS_RATE = -5.0   # 止损线: -5.0%
-TAKE_PROFIT_RATE = 15.0 # 止盈线: +15.0%
+# *** 新增实战交易成本 ***
+TRANSACTION_COST = 0.2          # 双向交易成本 (买入+卖出)，假设为 0.2%
 # ---
 
 # 定义输出结果的中文列名映射表 
@@ -30,57 +29,14 @@ OUTPUT_COLUMNS_MAPPING = {
     'Calculated_MA200': f'MA({MA_PERIOD}日)',
     'Calculated_MACD_Histo': 'MACD柱',
     'Calculated_KDJ_J': 'KDJ_J值',
-    'Return_5D': f'未来{HOLDING_DAYS}日收益率(%)', 
+    'Return_5D': f'未来{HOLDING_DAYS}日净收益率(%)', # 更改名称体现净收益
     '振幅': '振幅',
     '涨跌幅': '涨跌幅',
     '换手率': '换手率'
 }
 INDICATOR_COLS = ['Calculated_RSI', 'Calculated_MA200', 'Calculated_MACD_Histo', 'Calculated_KDJ_J']
 
-
-# === 新增：动态收益计算函数 ===
-def calculate_dynamic_return(row, sl_rate, tp_rate, holding_days):
-    """
-    计算在持有期内，考虑止损/止盈后的实际收益率。
-    假设买入价为信号日收盘价 (Buy_Price)。
-    未来 High/Low 为持有期内的最高/最低价。
-    未来 Close 为持有期末的收盘价。
-    """
-    buy_price = row['Close_Price']
-    
-    # 计算止损/止盈价格
-    sl_price = buy_price * (1 + sl_rate / 100)
-    tp_price = buy_price * (1 + tp_rate / 100)
-    
-    # 获取持有期内的最高和最低价格
-    future_high = row[f'Future_{holding_days}D_High']
-    future_low = row[f'Future_{holding_days}D_Low']
-    
-    # 获取持有期末的收盘价
-    final_close = row[f'Future_{holding_days}D_Close']
-    
-    # 1. 判断是否触发止损 (最低价触及止损价)
-    if future_low <= sl_price:
-        # 确定是否先触发止损。由于是超卖反弹策略，假设止损优先于止盈
-        if future_high >= tp_price and abs(tp_price - buy_price) > abs(buy_price - sl_price):
-             # 极端情况：如果最高涨幅超过最低跌幅，可能先触及止盈，但简化模型中，我们采用止损优先或看哪个先发生
-             # 简化处理：如果最低价跌破止损线，我们就认为止损触发
-             return sl_rate 
-        
-        return sl_rate
-
-    # 2. 判断是否触发止盈 (最高价触及止盈价)
-    elif future_high >= tp_price:
-        return tp_rate
-        
-    # 3. 未触发止损/止盈，按固定天数收盘价退出
-    elif pd.notna(final_close):
-        return (final_close / buy_price - 1) * 100
-    
-    # 无法计算收益 (数据末尾)
-    return np.nan
-
-
+# (其他辅助函数，如 convert_to_shanghai_time 保持不变)
 def convert_to_shanghai_time(dt_utc):
     """将 UTC 时间转换为上海时间 (UTC+8)"""
     utc_tz = timezone.utc
@@ -96,21 +52,20 @@ def run_backtest_analysis():
     timestamp = now_shanghai.strftime('%Y%m%d_%H%M%S')
     year_month_dir = now_shanghai.strftime('%Y/%m')
     output_sub_dir = os.path.join(OUTPUT_DIR_BASE, year_month_dir)
-    # 更改文件名以体现止损止盈
-    output_filename = f"{timestamp}_BACKTEST_REPORT_{HOLDING_DAYS}D_SL{int(abs(STOP_LOSS_RATE))}TP{int(TAKE_PROFIT_RATE)}.csv" 
+    # 更改文件名以体现成本扣除
+    output_filename = f"{timestamp}_BACKTEST_REPORT_{HOLDING_DAYS}D_COST{TRANSACTION_COST}%.csv" 
     output_path = os.path.join(output_sub_dir, output_filename)
     
     os.makedirs(output_sub_dir, exist_ok=True)
     all_signals_data = []
     
-    print(f"Starting backtest analysis with SL: {STOP_LOSS_RATE}% / TP: {TAKE_PROFIT_RATE}%.")
+    print(f"Starting backtest analysis with fixed 5D holding and Cost: {TRANSACTION_COST}%.")
     total_processed_stocks = 0
     
     for file_path in glob.glob(os.path.join(STOCK_DATA_DIR, '*.csv')):
         try:
             df = pd.read_csv(file_path)
             
-            # 检查所有必需的中文列是否存在
             required_cols = {PRICE_COLUMN, HIGH_COL, LOW_COL, '日期'}
             if not required_cols.issubset(df.columns):
                 continue
@@ -126,7 +81,7 @@ def run_backtest_analysis():
             }, inplace=True)
             df_temp['Close_Price'] = pd.to_numeric(df_temp['Close_Price'], errors='coerce')
 
-            # 计算所有指标 (与优化版相同)
+            # 计算所有指标
             rsi_indicator = RSIIndicator(close=df_temp['Close_Price'], window=RSI_PERIOD, fillna=False)
             df_temp['Calculated_RSI'] = rsi_indicator.rsi()
             
@@ -141,29 +96,24 @@ def run_backtest_analysis():
             df_temp['Calculated_KDJ_D'] = kdj_indicator.stoch_signal()
             df_temp['Calculated_KDJ_J'] = 3 * df_temp['Calculated_KDJ_K'] - 2 * df_temp['Calculated_KDJ_D']
             
-            # --- 步骤 2: 回测收益计算 (新增动态风控所需的未来High/Low/Close) ---
-            # 计算 HOLDING_DAYS 个交易日后的收盘价
+            # --- 步骤 2: 回测收益计算 (固定5日退出，并扣除成本) ---
             df_temp[f'Future_{HOLDING_DAYS}D_Close'] = df_temp['Close_Price'].shift(-HOLDING_DAYS)
             
-            # 计算未来 HOLDING_DAYS 周期内的最高价和最低价 (用 rolling window 实现)
-            df_temp[f'Future_{HOLDING_DAYS}D_High'] = df_temp['High_Price'].rolling(window=HOLDING_DAYS).max().shift(-HOLDING_DAYS + 1)
-            df_temp[f'Future_{HOLDING_DAYS}D_Low'] = df_temp['Low_Price'].rolling(window=HOLDING_DAYS).min().shift(-HOLDING_DAYS + 1)
+            # 计算毛收益率
+            df_temp['Gross_Return'] = (df_temp[f'Future_{HOLDING_DAYS}D_Close'] / df_temp['Close_Price'] - 1) * 100
             
-            # *** 应用动态风控收益计算 ***
-            df_temp['Return_5D'] = df_temp.apply(
-                lambda row: calculate_dynamic_return(row, STOP_LOSS_RATE, TAKE_PROFIT_RATE, HOLDING_DAYS), 
-                axis=1
-            )
+            # *** 扣除交易成本 ***
+            df_temp['Return_5D'] = df_temp['Gross_Return'] - TRANSACTION_COST
             
-            # --- 步骤 3: 筛选所有历史信号 (与优化版相同) ---
+            # --- 步骤 3: 筛选所有历史信号 (RSI<25 & MACD负值抬升) ---
             backtest_signals = df_temp.copy()
             
             condition_ma = backtest_signals['Close_Price'] > backtest_signals['Calculated_MA200']
-            condition_rsi = backtest_signals['Calculated_RSI'] < RSI_THRESHOLD
+            condition_rsi = backtest_signals['Calculated_RSI'] < RSI_THRESHOLD # RSI < 25
             
             backtest_signals['Prev_MACD_Histo'] = backtest_signals['Calculated_MACD_Histo'].shift(1)
             condition_macd_rising = backtest_signals['Calculated_MACD_Histo'] > backtest_signals['Prev_MACD_Histo']
-            condition_macd_negative = backtest_signals['Prev_MACD_Histo'] < 0
+            condition_macd_negative = backtest_signals['Prev_MACD_Histo'] < 0 # MACD 负值抬升
 
             condition_kdj = backtest_signals['Calculated_KDJ_J'] > backtest_signals['Calculated_KDJ_K']
             
@@ -199,6 +149,7 @@ def run_backtest_analysis():
         # --- 总体统计和盈亏分析 ---
         total_signals = len(final_df)
         
+        # 成功定义：净收益 > 0
         successful_signals = final_df[final_df['Return_5D'] > 0]
         losing_signals = final_df[final_df['Return_5D'] <= 0] 
         
@@ -215,10 +166,8 @@ def run_backtest_analysis():
         else:
             profit_loss_ratio = float('inf') 
         
-        # 排序
         final_df = final_df.sort_values(by=['Calculated_RSI', 'Calculated_KDJ_J'], ascending=[True, False])
         
-        # 筛选和重命名列 (汉化)
         columns_to_keep_eng = [k for k in OUTPUT_COLUMNS_MAPPING.keys() if k in final_df.columns]
         
         final_df = final_df[columns_to_keep_eng]
@@ -228,17 +177,17 @@ def run_backtest_analysis():
 
         # 打印回测报告 
         print("\n" + "="*50)
-        print(f"        🎉 策略回测报告 - 5日持仓 (SL/TP风控版) 🎉")
-        print(f"    *** 风控参数: 止损 {STOP_LOSS_RATE}% / 止盈 {TAKE_PROFIT_RATE}% ***")
+        print(f"        🎉 策略回测报告 - 5日持仓 (最终净收益版) 🎉")
+        print(f"    *** 交易成本扣除: {TRANSACTION_COST}% ***")
         print("="*50)
         print(f"    分析股票数量: {total_processed_stocks} 只")
         print(f"    历史信号总数: {total_signals} 个")
         print("-" * 50)
-        print(f"    ✅ 策略成功率 (胜率): {success_rate:.2f}%")
-        print(f"    累计净收益率: {total_net_return:.2f}% (所有交易收益总和)")
-        print(f"    平均盈利 (Avg. Win): +{avg_win_return:.2f}%")
-        print(f"    平均亏损 (Avg. Loss): -{avg_loss_return:.2f}%")
-        print(f"    🎯 **盈亏比 (R-Factor)**: {profit_loss_ratio:.2f}")
+        print(f"    ✅ 策略成功率 (净胜率): {success_rate:.2f}%")
+        print(f"    累计净收益率: {total_net_return:.2f}% (扣除成本后)")
+        print(f"    平均盈利 (Avg. Net Win): +{avg_win_return:.2f}%")
+        print(f"    平均亏损 (Avg. Net Loss): -{avg_loss_return:.2f}%")
+        print(f"    🎯 **净盈亏比 (R-Factor)**: {profit_loss_ratio:.2f}")
         print("="*50)
         print(f"\n✅ 详细回测结果已保存至: {output_path}")
     else:
