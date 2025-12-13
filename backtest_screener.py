@@ -11,13 +11,13 @@ from stock_screener_core import calculate_indicators, check_mode_1, check_mode_2
 # --- 回测配置 ---
 STOCK_DATA_DIR = 'stock_data' 
 OUTPUT_DIR = 'backtest_results'
-BACKTEST_START_DATE = datetime(2024, 10, 1) # 回测开始日期 (请根据您的数据调整)
+BACKTEST_START_DATE = datetime(2025, 10, 1) # 回测开始日期 (请根据您的数据调整)
 BACKTEST_END_DATE = datetime(2025, 12, 1)   # 回测结束日期 (请根据您的数据调整)
 HOLDING_DAYS = 5                            # 持有天数 (N天后卖出)
-MAX_STOCKS_TO_PROCESS = 500                  # <--- 限制处理的股票数量
+MAX_STOCKS_TO_PROCESS = 50                  # <--- 限制处理的股票数量
 TARGET_MODES = [
     '模式一：底部反转启动型 (买入机会)',
-    # '模式二：强势股整理再加速型 (买入机会)',
+    # '模式二：强势股整理再加速型 (买入机会)', # 默认只回测模式一
 ] # 目标回测的筛选模式列表
 
 # --- 工具函数 ---
@@ -129,7 +129,6 @@ def run_backtest():
                 is_selected = True
                 selected_mode = '模式二'
             elif '模式三：高风险预警型 (提前跑路)' in TARGET_MODES and check_mode_3(df_recent, df_calc):
-                 # 风险预警通常不用于回测收益，但可以记录
                  is_selected = True
                  selected_mode = '模式三 (预警)'
             
