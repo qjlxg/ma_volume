@@ -1,159 +1,244 @@
-import pandas as pd
-import numpy as np
 import os
 import re
-from datetime import datetime
+import pandas as pd
+from datetime import datetime, timedelta
+import pytz
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import time
 
-# 导入原始策略脚本中的核心函数
-# 假设 ma_volume_strategy.py 和 backtest.py 在同一目录下
-from ma_volume_strategy import calculate_indicators, check_c1_golden_cross, check_c4_trend_control
-
-# --- 常量定义 ---
+# --- 常量定义：针对测试效率和精确度优化 ---
 STOCK_DATA_DIR = 'stock_data'
-BACKTEST_START_DATE = '2023-01-01'  # 回测开始日期
-HOLDING_PERIOD = 20  # 持有期（天），例如 20 个交易日
-MAX_WORKERS = 8
+MAX_STOCK_COUNT = 50 # 核心调整：限制回测的股票文件数量
+MAX_WORKERS = 5       # 保持 4 个线程，适应 GitHub CI/CD 环境
+HOLD_DAYS = 30        # 持有天数
+BACKTEST_START_DATE = '2020-01-01'
+BACKTEST_END_DATE = '2025-12-13'    
+BACKTEST_STEP_DAYS = 1 # 保持 1 天步长，确保回测精确性
 
-# --- 回测核心逻辑 ---
+# --- 筛选逻辑函数 (保持不变，已修复 Pandas 警告) ---
+def calculate_indicators(data):
+    # ... (与之前版本相同)
+    if len(data) < 30:
+        return pd.DataFrame()
+    df = data.copy()
+    df.loc[:, 'Close'] = pd.to_numeric(df['Close'], errors='coerce')
+    df.loc[:, 'Volume'] = pd.to_numeric(df['Volume'], errors='coerce')
+    df.loc[:, 'MA5'] = df['Close'].rolling(window=5).mean()
+    df.loc[:, 'MA20'] = df['Close'].rolling(window=20).mean()
+    return df.dropna()
 
-def run_backtest_for_stock(file_path):
-    """
-    对单个股票数据文件运行回测逻辑。
+def check_c1_golden_cross(data):
+    # ... (与之前版本相同)
+    if len(data) < 2: return False
+    d0 = data.iloc[-1]
+    d1 = data.iloc[-2]
+    golden_cross = (d0['MA5'] > d0['MA20']) and (d1['MA5'] <= d1['MA20'])
+    entry_point = d0['Close'] > d0['MA20']
+    return golden_cross and entry_point
+
+def check_c4_trend_control(data, max_drawdown=0.15, max_days=30):
+    # ... (与之前版本相同)
+    if len(data) < 30: return False
+    ma20_slope = data['MA20'].iloc[-1] - data['MA20'].iloc[-5]
+    is_ma20_up = ma20_slope > 0
+    recent_high = data['Close'].iloc[-max_days:].max()
+    current_price = data['Close'].iloc[-1]
+    if recent_high == 0: return False
+    drawdown = (recent_high - current_price) / recent_high
+    is_drawdown_controlled = drawdown <= max_drawdown
+    return is_ma20_up and is_drawdown_controlled
+
+def select_stock_logic(data):
+    # ... (与之前版本相同)
+    data = calculate_indicators(data)
+    if data.empty: return False
+    data = data.sort_values(by='Date').reset_index(drop=True) 
+    condition_final = check_c1_golden_cross(data) and check_c4_trend_control(data)
+    return condition_final
+
+# --- 回测及止损逻辑 (保持不变，已包含 MA20 止损) ---
+def get_data_up_to_date(data, target_date):
+    data = data[data['Date'] <= target_date]
+    return data
+
+def calculate_return(data, buy_date, hold_days, stop_loss_ma=20):
+    """计算回报率，并使用 MA20 作为动态止损线。"""
+    buy_date_naive = buy_date.replace(tzinfo=None)
+    buy_data = data[data['Date'] == buy_date_naive]
     
-    返回: (总交易次数, 总收益, 胜次数, 败次数)
-    """
+    if buy_data.empty:
+        next_days = data[data['Date'] > buy_date_naive].sort_values(by='Date')
+        if next_days.empty: return None
+        buy_idx = next_days.index[0]
+    else:
+        buy_idx = buy_data.index[0]
+        
+    buy_price = data.at[buy_idx, 'Close']
+    buy_date_actual = data.at[buy_idx, 'Date']
+
+    sell_date_target = buy_date_actual + timedelta(days=hold_days)
+    
+    # 提取完整历史数据用于 MA20 止损计算
+    full_data_for_ma = data[data['Date'] <= sell_date_target].sort_values(by='Date')
+    full_data_for_ma.loc[:, 'MA20_SL'] = full_data_for_ma['Close'].rolling(window=stop_loss_ma).mean()
+    
+    # 找到买入日之后的数据，检查止损
+    future_data_with_ma = full_data_for_ma[full_data_for_ma['Date'] > buy_date_actual].reset_index(drop=True)
+    
+    if future_data_with_ma.empty: return None
+    
+    # 检查是否有止损点：收盘价低于 MA20
+    stop_loss_trigger = future_data_with_ma[future_data_with_ma['Close'] < future_data_with_ma['MA20_SL']]
+    
+    if not stop_loss_trigger.empty:
+        # 发生止损
+        stop_loss_day = stop_loss_trigger.iloc[0]
+        sell_price = stop_loss_day['Close']
+        sell_date = stop_loss_day['Date']
+        return (sell_price - buy_price) / buy_price, sell_date
+    
+    # 如果未触发止损，则在持有期结束时卖出
+    sell_price = future_data_with_ma['Close'].iloc[-1]
+    return (sell_price - buy_price) / buy_price, sell_date_target
+
+
+def backtest_single_stock(file_path, test_dates):
+    """回测单个股票，精确匹配日期格式并尝试多种编码。"""
     try:
-        # 读取数据 (使用与原脚本相同的读取方式)
-        data = pd.read_csv(
-            file_path, 
-            header=None, 
-            names=['Date', 'Code', 'Open', 'Close', 'High', 'Low', 'Volume', 'Amount', 'Amplitude', 'ChangePct', 'ChangeAmt', 'Turnover'],
-            parse_dates=['Date'],
-            date_format='%Y-%m-%d'
-        )
+        match = re.search(r'(\d{6})\.csv$', file_path)
+        if not match: return None
+        stock_code = match.group(1)
+        
+        column_names = ['Date', 'Code', 'Open', 'Close', 'High', 'Low', 'Volume', 'Amount', 'Amplitude', 'ChangePct', 'ChangeAmt', 'Turnover']
+        
+        # 尝试多种编码
+        for encoding_type in ['utf-8', 'gb18030', 'gbk']:
+            try:
+                data = pd.read_csv(file_path, header=0, names=column_names, encoding=encoding_type)
+                break 
+            except UnicodeDecodeError:
+                continue
+        else:
+            return None
+        
+        # 精确指定日期格式
+        data.loc[:, 'Date'] = pd.to_datetime(data['Date'], format='%Y-%m-%d', errors='coerce').dt.tz_localize(None)
+        data = data.dropna(subset=['Date'])
         
         data = data.sort_values(by='Date').reset_index(drop=True)
-        data['Date'] = pd.to_datetime(data['Date'])
         
-        # 过滤掉回测开始日期之前的数据，并计算指标
-        data = data[data['Date'] >= BACKTEST_START_DATE].copy()
-        
-        # 必须先计算指标，因为金叉和趋势控制都需要
-        data_with_indicators = calculate_indicators(data)
-        
-        # 如果数据不足，跳过
-        if data_with_indicators.empty:
-            return 0, 0.0, 0, 0
-
-        # 初始化回测变量
-        trades_count = 0
-        total_return = 0.0
-        win_count = 0
-        loss_count = 0
-        
-        # 确保索引是从0开始的连续整数
-        data_with_indicators = data_with_indicators.reset_index(drop=True)
-        
-        # 从指标计算完毕后（至少30条数据）的第二天开始回溯
-        start_index = 1
-        
-        # 遍历所有可能的交易日作为买入点
-        for i in range(start_index, len(data_with_indicators)):
-            current_data = data_with_indicators.iloc[:i+1]
+        results = []
+        for test_date in test_dates:
+            hist_data = get_data_up_to_date(data, test_date)
             
-            # 1. 执行选股逻辑 (使用原策略的 C1 + C4 组合)
-            # 注意：这里调用的是原脚本中的函数
-            is_golden_cross = check_c1_golden_cross(current_data)
-            is_trend_controlled = check_c4_trend_control(current_data)
-            
-            if is_golden_cross and is_trend_controlled:
-                
-                # 2. 确定买入日和卖出日
-                buy_index = i  # 当天满足条件，次日开盘买入 (简化为当日收盘价买入)
-                sell_index = min(i + HOLDING_PERIOD, len(data_with_indicators) - 1)
-                
-                # 如果持有期结束前数据不够，跳过本次买入
-                if sell_index <= buy_index:
-                    continue
-                
-                # 3. 计算收益
-                # 简化：买入价为当日收盘价，卖出价为持有期结束日收盘价
-                buy_price = data_with_indicators.iloc[buy_index]['Close']
-                sell_price = data_with_indicators.iloc[sell_index]['Close']
-                
-                if buy_price > 0:
-                    trades_count += 1
-                    trade_return = (sell_price / buy_price) - 1
-                    total_return += trade_return
-                    
-                    if trade_return > 0:
-                        win_count += 1
-                    else:
-                        loss_count += 1
-                        
-        return trades_count, total_return, win_count, loss_count
+            is_trade_day = not hist_data[hist_data['Date'] == test_date].empty
+            if not is_trade_day: continue
 
+            if select_stock_logic(hist_data):
+                ret_tuple = calculate_return(data, test_date, HOLD_DAYS)
+                if ret_tuple is not None:
+                    ret, sell_date = ret_tuple
+                    results.append({'code': stock_code, 'buy_date': test_date, 'sell_date': sell_date, 'return': ret})
+        return results if results else None
     except Exception as e:
-        stock_code_match = re.search(r'(\d{6})\.csv$', file_path)
-        stock_code = stock_code_match.group(1) if stock_code_match else 'UNKNOWN'
-        print(f"Error processing stock {stock_code} in backtest: {e}")
-        return 0, 0.0, 0, 0
+        # 打印详细错误信息，方便调试
+        print(f'❌ 内部错误: {file_path} 回测失败: {e}')
+        return None
 
-def main_backtest():
-    """主函数：并行扫描所有股票并输出回测结果。"""
+def main_backtester():
+    """主回测函数。"""
+    start_time = time.time()
+    shanghai_tz = pytz.timezone('Asia/Shanghai')
     
+    # 1. 初始化和生成测试日期
+    print("--- 步骤 1: 初始化和生成测试日期列表 ---")
+    start_date_tz = datetime.strptime(BACKTEST_START_DATE, '%Y-%m-%d').replace(tzinfo=shanghai_tz)
+    end_date_tz = datetime.strptime(BACKTEST_END_DATE, '%Y-%m-%d').replace(tzinfo=shanghai_tz)
+    test_dates = []
+    current_date = start_date_tz
+    while current_date <= end_date_tz:
+        test_dates.append(current_date.replace(tzinfo=None))
+        current_date += timedelta(days=BACKTEST_STEP_DAYS)
+    print(f"✅ 完成。步长 {BACKTEST_STEP_DAYS} 天 (每日回测)，共生成 {len(test_dates)} 个回测点。")
+    
+    # 2. 检查数据目录和文件
+    print("--- 步骤 2: 查找数据文件 ---")
     if not os.path.isdir(STOCK_DATA_DIR):
         print(f"Error: Stock data directory '{STOCK_DATA_DIR}' not found.")
         return
 
-    # 1. 扫描所有股票数据文件
-    all_files = [os.path.join(STOCK_DATA_DIR, f) 
-                 for f in os.listdir(STOCK_DATA_DIR) 
-                 if f.endswith('.csv') and re.match(r'\d{6}\.csv$', f)]
-                 
-    if not all_files:
-        print("No stock data CSV files found in 'stock_data' directory.")
+    all_files_full = [os.path.join(STOCK_DATA_DIR, f) for f in os.listdir(STOCK_DATA_DIR) if f.endswith('.csv') and re.match(r'\d{6}\.csv$', f)]
+    if not all_files_full:
+        print(f"Error: No stock data CSV files found in '{STOCK_DATA_DIR}'.")
         return
 
-    print(f"Found {len(all_files)} files. Starting parallel backtesting from {BACKTEST_START_DATE}...")
-
-    # 2. 并行执行回测
+    # 核心限制：只取前 N 个文件进行测试
+    all_files = all_files_full[:MAX_STOCK_COUNT]
+    
+    print(f"✅ 完成。找到 {len(all_files_full)} 个股票文件。本次仅回测前 {len(all_files)} 个文件。")
+    
+    # 3. 执行并行回测
+    print(f"--- 步骤 3: 启动并行回测 (股票数: {len(all_files)} / 线程数: {MAX_WORKERS}) ---")
+    print("🚀 预计运行时间已大幅缩短。")
     all_results = []
+    
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        future_to_file = {executor.submit(run_backtest_for_stock, file): file for file in all_files}
+        future_to_file = {executor.submit(backtest_single_stock, file, test_dates): file for file in all_files}
+        
+        processed_count = 0
+        total_files = len(all_files)
         
         for future in as_completed(future_to_file):
-            result = future.result()
-            if result:
-                all_results.append(result)
+            file_path = future_to_file[future]
+            processed_count += 1
+            
+            try:
+                future.result()
+            except Exception as exc:
+                print(f'❌ 线程错误: {file_path} 产生异常: {exc} ({processed_count}/{total_files})')
+            
+            # 每处理 20 个文件打印一次进度
+            if processed_count % 20 == 0:
+                print(f"⏳ 进度: 已处理 {processed_count}/{total_files} 个文件...")
+            
+            # 统一收集结果
+            if future.result():
+                all_results.extend(future.result())
 
-    # 3. 汇总结果
-    total_trades = sum(r[0] for r in all_results)
-    cumulative_return = sum(r[1] for r in all_results)
-    total_wins = sum(r[2] for r in all_results)
-    total_losses = sum(r[3] for r in all_results)
-    
-    if total_trades == 0:
-        print("\nBacktest completed. No trades were executed under the current strategy and date range.")
+    # 4. 汇总和输出结果
+    print("\n--- 步骤 4: 汇总结果 ---")
+    if not all_results:
+        print("未发现任何符合策略的交易信号。")
         return
 
-    # 4. 计算关键指标
-    average_trade_return = cumulative_return / total_trades
-    win_rate = total_wins / total_trades if total_trades > 0 else 0
+    results_df = pd.DataFrame(all_results)
     
-    # 5. 报告结果
+    total_trades = len(results_df)
+    avg_return = results_df['return'].mean()
+    win_rate = (results_df['return'] > 0).sum() / total_trades if total_trades > 0 else 0
+    
+    end_time = time.time()
+    run_time = end_time - start_time
+    
+    now = datetime.now(shanghai_tz)
+    output_dir = now.strftime('%Y/%m')
+    os.makedirs(output_dir, exist_ok=True)
+    timestamp_str = now.strftime('%Y%m%d_%H%M%S')
+    output_filename = f"backtest_results_100_daily_{timestamp_str}.csv"
+    output_path = os.path.join(output_dir, output_filename)
+    
+    results_df[['code', 'buy_date', 'sell_date', 'return']].to_csv(output_path, index=False, encoding='utf-8')
+
     print("\n" + "="*50)
-    print("📈 **回测结果报告** 📉")
-    print(f"策略：金叉启动 (C1) + 趋势控制 (C4)")
-    print(f"回测时间范围：{BACKTEST_START_DATE} 至今")
-    print(f"持有期：{HOLDING_PERIOD} 个交易日")
-    print("---")
-    print(f"**总交易次数:** {total_trades}")
-    print(f"**总累计收益率:** {cumulative_return:,.2f} ({cumulative_return * 100:.2f}%)")
-    print(f"**平均单笔收益率:** {average_trade_return * 100:.2f}%")
-    print(f"**胜率 (盈利交易):** {win_rate * 100:.2f}% ({total_wins} 胜 / {total_trades} 总)")
+    print("📈 回测完成")
+    print(f"回测范围: **前 {MAX_STOCK_COUNT} 只股票**")
+    print(f"回测类型: 每日精确回测 (步长 {BACKTEST_STEP_DAYS} 天)")
+    print(f"总交易次数 (信号数量): {total_trades}")
+    print(f"平均回报率: {avg_return:.2%}")
+    print(f"胜率 (回报率 > 0): {win_rate:.2%}")
+    print(f"总运行时间: {run_time:.2f} 秒")
+    print(f"结果已保存至: {output_path}")
     print("="*50)
-    
+
 if __name__ == '__main__':
-    main_backtest()
+    main_backtester()
