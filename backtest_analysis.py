@@ -52,15 +52,15 @@ def run_backtest_analysis():
     timestamp = now_shanghai.strftime('%Y%m%d_%H%M%S')
     year_month_dir = now_shanghai.strftime('%Y/%m')
     output_sub_dir = os.path.join(OUTPUT_DIR_BASE, year_month_dir)
-    # 更改文件名以体现A股过滤和成本扣除
-    output_filename = f"{timestamp}_BACKTEST_REPORT_A股_COST{TRANSACTION_COST}%.csv" 
+    # 更改文件名以体现A股过滤、成本扣除和风险股过滤
+    output_filename = f"{timestamp}_BACKTEST_REPORT_A股_无风险股_COST{TRANSACTION_COST}%.csv" 
     output_path = os.path.join(output_sub_dir, output_filename)
     
     os.makedirs(output_sub_dir, exist_ok=True)
     all_signals_data = []
     
     print(f"Starting backtest analysis with fixed 5D holding and Cost: {TRANSACTION_COST}%.")
-    print("Applying A-share filter (code starts with 60, 68, 00, or 30).")
+    print("Applying A-share filter and attempting to filter ST/*ST stocks (based on daily volatility).")
     total_processed_stocks = 0
     total_scanned_stocks = 0
     
@@ -69,18 +69,30 @@ def run_backtest_analysis():
         stock_code = os.path.basename(file_path).replace('.csv', '')
         total_scanned_stocks += 1
         
-        # *** 新增：沪深A股过滤逻辑 ***
+        # *** 沪深A股过滤逻辑 ***
         if not (stock_code.startswith('60') or stock_code.startswith('68') or \
                 stock_code.startswith('00') or stock_code.startswith('30')):
-            # print(f" - Skipping {stock_code}: Not a recognized A-share code.")
             continue
             
         try:
             df = pd.read_csv(file_path)
             
-            required_cols = {PRICE_COLUMN, HIGH_COL, LOW_COL, '日期'}
+            required_cols = {PRICE_COLUMN, HIGH_COL, LOW_COL, '日期', '涨跌幅'}
             if not required_cols.issubset(df.columns):
                 continue
+            
+            # --- 步骤 0: 风险股过滤 (基于涨跌幅限制) ---
+            # 计算过去30个交易日涨跌幅大于5.5%的次数
+            # 我们假设涨跌幅大于 5.5% 的股票不是 ST 股（因为 ST 股限制在 5%）
+            df['涨跌幅'] = pd.to_numeric(df['涨跌幅'], errors='coerce')
+            
+            # 统计近30日内，日涨跌幅超过 5.5% 的天数
+            df['High_Volatility_Days'] = (df['涨跌幅'].abs() > 5.5).rolling(window=30).sum()
+            
+            # 如果近30日内，高波动天数少于3天，我们高度怀疑它是ST股或交易不活跃，直接跳过
+            if df['High_Volatility_Days'].max() < 3 and len(df) > 30:
+                 print(f" - Skipping {stock_code}: Suspected low-volatility/ST stock.")
+                 continue
             
             total_processed_stocks += 1
 
@@ -117,7 +129,7 @@ def run_backtest_analysis():
             # *** 扣除交易成本 ***
             df_temp['Return_5D'] = df_temp['Gross_Return'] - TRANSACTION_COST
             
-            # --- 步骤 3: 筛选所有历史信号 (RSI<25 & MACD负值抬升) ---
+            # --- 步骤 3: 筛选所有历史信号 ---
             backtest_signals = df_temp.copy()
             
             # 1. 长期趋势向上 (收盘价 > MA200)
@@ -165,7 +177,6 @@ def run_backtest_analysis():
         # --- 总体统计和盈亏分析 ---
         total_signals = len(final_df)
         
-        # 成功定义：净收益 > 0
         successful_signals = final_df[final_df['Return_5D'] > 0]
         losing_signals = final_df[final_df['Return_5D'] <= 0] 
         
@@ -193,10 +204,10 @@ def run_backtest_analysis():
 
         # 打印回测报告 
         print("\n" + "="*50)
-        print(f"        🎉 策略回测报告 - 5日持仓 (沪深A股净收益版) 🎉")
+        print(f"        🎉 策略回测报告 - 5日持仓 (沪深A股无风险股净收益版) 🎉")
         print(f"    *** 交易成本扣除: {TRANSACTION_COST}% ***")
         print("="*50)
-        print(f"    分析股票数量: {total_scanned_stocks} 只 (其中 {total_processed_stocks} 只为沪深A股)")
+        print(f"    分析股票数量: {total_scanned_stocks} 只 (其中 {total_processed_stocks} 只为沪深A股/非风险股)")
         print(f"    历史信号总数: {total_signals} 个")
         print("-" * 50)
         print(f"    ✅ 策略成功率 (净胜率): {success_rate:.2f}%")
