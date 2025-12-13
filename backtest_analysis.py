@@ -52,7 +52,6 @@ def run_backtest_analysis():
     timestamp = now_shanghai.strftime('%Y%m%d_%H%M%S')
     year_month_dir = now_shanghai.strftime('%Y/%m')
     output_sub_dir = os.path.join(OUTPUT_DIR_BASE, year_month_dir)
-    # 更改文件名以体现A股过滤、成本扣除和风险股过滤
     output_filename = f"{timestamp}_BACKTEST_REPORT_A股_无风险股_COST{TRANSACTION_COST}%.csv" 
     output_path = os.path.join(output_sub_dir, output_filename)
     
@@ -82,16 +81,14 @@ def run_backtest_analysis():
                 continue
             
             # --- 步骤 0: 风险股过滤 (基于涨跌幅限制) ---
-            # 计算过去30个交易日涨跌幅大于5.5%的次数
-            # 我们假设涨跌幅大于 5.5% 的股票不是 ST 股（因为 ST 股限制在 5%）
             df['涨跌幅'] = pd.to_numeric(df['涨跌幅'], errors='coerce')
             
-            # 统计近30日内，日涨跌幅超过 5.5% 的天数
+            # 统计近30日内，日涨跌幅绝对值超过 5.5% 的天数 (用来识别非ST股)
             df['High_Volatility_Days'] = (df['涨跌幅'].abs() > 5.5).rolling(window=30).sum()
             
             # 如果近30日内，高波动天数少于3天，我们高度怀疑它是ST股或交易不活跃，直接跳过
             if df['High_Volatility_Days'].max() < 3 and len(df) > 30:
-                 print(f" - Skipping {stock_code}: Suspected low-volatility/ST stock.")
+                 # print(f" - Skipping {stock_code}: Suspected low-volatility/ST stock.")
                  continue
             
             total_processed_stocks += 1
@@ -123,7 +120,6 @@ def run_backtest_analysis():
             # --- 步骤 2: 回测收益计算 (固定5日退出，并扣除成本) ---
             df_temp[f'Future_{HOLDING_DAYS}D_Close'] = df_temp['Close_Price'].shift(-HOLDING_DAYS)
             
-            # 计算毛收益率
             df_temp['Gross_Return'] = (df_temp[f'Future_{HOLDING_DAYS}D_Close'] / df_temp['Close_Price'] - 1) * 100
             
             # *** 扣除交易成本 ***
@@ -153,7 +149,6 @@ def run_backtest_analysis():
             filtered_df_temp = backtest_signals[final_filter].copy()
             
             if not filtered_df_temp.empty:
-                # 排除数据末尾，无法计算未来收益的信号
                 filtered_df_temp.dropna(subset=['Return_5D'], inplace=True) 
                 
                 if not filtered_df_temp.empty:
@@ -165,18 +160,24 @@ def run_backtest_analysis():
                         
                     filtered_df.insert(0, 'StockCode', stock_code)
                     all_signals_data.append(filtered_df)
-                    print(f" - Found {len(filtered_df)} historical signals for {stock_code}")
+                    # print(f" - Found {len(filtered_df)} historical signals for {stock_code}")
                 
         except Exception as e:
-            print(f"Error processing {file_path}: {e}")
+            # print(f"Error processing {file_path}: {e}")
+             pass
 
     # 4. 合并、计算总体成功率和盈亏指标并保存报告
     if all_signals_data:
         final_df = pd.concat(all_signals_data, ignore_index=True)
         
+        # 将日期列转换为日期格式，以便正确排序
+        final_df['日期'] = pd.to_datetime(final_df['日期'], errors='coerce') 
+
+        # *** 关键修改：按日期降序排列 (最新的信号在前) ***
+        final_df = final_df.sort_values(by=['日期'], ascending=[False])
+        
         # --- 总体统计和盈亏分析 ---
         total_signals = len(final_df)
-        
         successful_signals = final_df[final_df['Return_5D'] > 0]
         losing_signals = final_df[final_df['Return_5D'] <= 0] 
         
@@ -192,8 +193,6 @@ def run_backtest_analysis():
             profit_loss_ratio = avg_win_return / avg_loss_return
         else:
             profit_loss_ratio = float('inf') 
-        
-        final_df = final_df.sort_values(by=['Calculated_RSI', 'Calculated_KDJ_J'], ascending=[True, False])
         
         columns_to_keep_eng = [k for k in OUTPUT_COLUMNS_MAPPING.keys() if k in final_df.columns]
         
