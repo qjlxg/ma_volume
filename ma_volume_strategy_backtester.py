@@ -58,7 +58,10 @@ def get_data_up_to_date(data, target_date):
 
 def calculate_return(data, buy_date, hold_days):
     """计算持有期回报。"""
-    buy_idx = data[data['Date'] == buy_date].index[0]
+    buy_row = data[data['Date'] == buy_date]
+    if buy_row.empty:
+        return None
+    buy_idx = buy_row.index[0]
     sell_date = buy_date + timedelta(days=hold_days)
     future_data = data[(data['Date'] > buy_date) & (data['Date'] <= sell_date)]
     if len(future_data) < hold_days // 2:  # 数据不足，跳过
@@ -74,13 +77,18 @@ def backtest_single_stock(file_path, test_dates):
         if not match:
             return None
         stock_code = match.group(1)
+        # 读取CSV，不自动解析日期
         data = pd.read_csv(
             file_path,
             header=None,
             names=['Date', 'Code', 'Open', 'Close', 'High', 'Low', 'Volume', 'Amount', 'Amplitude', 'ChangePct', 'ChangeAmt', 'Turnover'],
-            parse_dates=['Date'],
-            date_format='%Y-%m-%d'
         )
+        # 检查是否包含表头
+        if pd.isna(pd.to_datetime(data['Date'].iloc[0], format='%Y-%m-%d', errors='coerce')):
+            data = data.iloc[1:].reset_index(drop=True)  # 跳过表头
+        # 解析日期
+        data['Date'] = pd.to_datetime(data['Date'], format='%Y-%m-%d', errors='coerce')
+        data = data.dropna(subset=['Date'])  # 移除无效日期行
         data = data.sort_values(by='Date').reset_index(drop=True)
         
         results = []
@@ -100,9 +108,9 @@ def main_backtester():
     shanghai_tz = pytz.timezone('Asia/Shanghai')
     now = datetime.now(shanghai_tz)
     
-    # 生成测试日期列表（从起始到结束，每隔STEP天）
-    start_date = datetime.strptime(BACKTEST_START_DATE, '%Y-%m-%d').replace(tzinfo=shanghai_tz)
-    end_date = datetime.strptime(BACKTEST_END_DATE, '%Y-%m-%d').replace(tzinfo=shanghai_tz)
+    # 生成测试日期列表（从起始到结束，每隔STEP天），保持naive datetime
+    start_date = datetime.strptime(BACKTEST_START_DATE, '%Y-%m-%d')
+    end_date = datetime.strptime(BACKTEST_END_DATE, '%Y-%m-%d')
     test_dates = []
     current_date = start_date
     while current_date <= end_date:
