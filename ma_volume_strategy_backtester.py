@@ -7,57 +7,58 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
 import sys
 
-# --- 常量定义：恢复 MA20 趋势，加入 RSI 过滤 ---
+# --- 常量定义：价格突破核心配置 ---
 STOCK_DATA_DIR = 'stock_data'
 MAX_STOCK_COUNT = 25      # 保持 25 只股票，进行极速回测
-MAX_WORKERS = 8           
-HOLD_DAYS = 30            # H=30
+MAX_WORKERS = 4           
+HOLD_DAYS = 30            
 BACKTEST_START_DATE = '2020-01-01'
 BACKTEST_END_DATE = '2025-12-13'    
 BACKTEST_STEP_DAYS = 1    
+BREAKOUT_PERIOD = 20      # 突破周期设置为 20 天
 
-# --- 筛选逻辑函数 (已更新：计算 RSI，恢复 MA20 趋势判断) ---
-def calculate_indicators(data, rsi_period=14):
-    """计算所需的均线（MA5, MA20）、成交量均线（VMA20）和 RSI(14)。"""
-    if len(data) < 20: return pd.DataFrame() # 最小数据长度要求恢复到 20+
+# --- 筛选逻辑函数 (已更新：计算指标，并重写 C1) ---
+def calculate_indicators(data):
+    """计算所需的指标：MA20, VMA20, 和 20日最高收盘价。"""
+    if len(data) < BREAKOUT_PERIOD: return pd.DataFrame()
     df = data.copy()
     df.loc[:, 'Close'] = pd.to_numeric(df['Close'], errors='coerce')
     df.loc[:, 'Volume'] = pd.to_numeric(df['Volume'], errors='coerce')
     
-    # 均线和成交量均线
-    df.loc[:, 'MA5'] = df['Close'].rolling(window=5).mean()
     df.loc[:, 'MA20'] = df['Close'].rolling(window=20).mean()
     df.loc[:, 'VMA20'] = df['Volume'].rolling(window=20).mean()
+    # 新增：计算 20 日最高收盘价
+    df.loc[:, 'High_20D'] = df['Close'].rolling(window=BREAKOUT_PERIOD).max()
 
-    # 计算 RSI (Relative Strength Index)
-    delta = df['Close'].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=rsi_period).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=rsi_period).mean()
-    RS = gain / loss
-    df.loc[:, 'RSI'] = 100 - (100 / (1 + RS))
-    
     return df.dropna()
 
-def check_c1_golden_cross(data):
-    """检查5日均线金叉20日均线及入场点。"""
+def check_c1_price_breakout(data):
+    """检查 C1 升级版：收盘价突破过去 20 日高点。"""
     if len(data) < 2: return False
     d0 = data.iloc[-1]
     d1 = data.iloc[-2]
-    golden_cross = (d0['MA5'] > d0['MA20']) and (d1['MA5'] <= d1['MA20'])
-    entry_point = d0['Close'] > d0['MA20']
-    return golden_cross and entry_point
+    
+    # 当前收盘价 > 20日最高收盘价 (确保是突破)
+    is_breaking = (d0['Close'] > d0['High_20D'])
+    
+    # 辅助条件：前一日收盘价 < 20日最高收盘价 (确保是当日发生的突破，而非持续在高位)
+    # is_new_break = (d1['Close'] <= d1['High_20D']) 
+    
+    # 为了简化和最大化信号数量，我们只用主要的突破条件
+    return is_breaking 
 
 def check_c4_trend_control(data, max_drawdown=0.15, max_days=30, trend_ma_period=20):
-    """检查 MA20 趋势向上和回撤控制 (已恢复 MA20)。"""
+    """检查 MA20 趋势向上和回撤控制。"""
     if len(data) < trend_ma_period: return False
     
-    # 核心修改：检查 MA20 的斜率
+    # 检查 MA20 的斜率
     ma_trend = data[f'MA{trend_ma_period}'].iloc[-5:] 
     if len(ma_trend) < 5: return False
     ma_slope = ma_trend.iloc[-1] - ma_trend.iloc[0]
     
     is_ma_up = ma_slope > 0
     
+    # 回撤控制逻辑 (保持不变)
     recent_high = data['Close'].iloc[-max_days:].max()
     current_price = data['Close'].iloc[-1]
     if recent_high == 0: return False
@@ -72,30 +73,20 @@ def check_c5_volume_filter(data):
     d0 = data.iloc[-1]
     return d0['Volume'] > d0['VMA20']
 
-def check_c6_rsi_filter(data, rsi_low=40, rsi_high=70):
-    """检查 RSI 是否处于中性区域 (40 < RSI < 70)。"""
-    if data.empty: return False
-    d0 = data.iloc[-1]
-    current_rsi = d0.get('RSI')
-    if pd.isna(current_rsi): return False
-    
-    return (current_rsi > rsi_low) and (current_rsi < rsi_high)
-
 def select_stock_logic(data):
-    """组合策略逻辑 (金叉 + MA20 趋势/回撤 + 成交量放大 + RSI 过滤)。"""
+    """组合策略逻辑 (价格突破 + MA20 趋势/回撤 + 成交量放大)。"""
     data = calculate_indicators(data)
     if data.empty: return False
     data = data.sort_values(by='Date').reset_index(drop=True) 
     
-    c1 = check_c1_golden_cross(data)
-    c4 = check_c4_trend_control(data, trend_ma_period=20) # 恢复 MA20 趋势检查
+    c1 = check_c1_price_breakout(data) # 价格突破代替金叉
+    c4 = check_c4_trend_control(data, trend_ma_period=20) 
     c5 = check_c5_volume_filter(data)
-    c6 = check_c6_rsi_filter(data)
     
-    condition_final = c1 and c4 and c5 and c6 # 所有条件必须同时满足
+    condition_final = c1 and c4 and c5 # 所有条件必须同时满足
     return condition_final
 
-# --- (以下回测和主函数代码保持不变) ---
+# --- (以下回测及止损逻辑保持不变) ---
 def get_data_up_to_date(data, target_date):
     data = data[data['Date'] <= target_date]
     return data
@@ -176,8 +167,6 @@ def backtest_single_stock(file_path, test_dates):
                     results.append({'code': stock_code, 'buy_date': test_date, 'sell_date': sell_date, 'return': ret})
         return results if results else None
     except Exception as e:
-        # 简化错误输出，避免 CI/CD log 过长
-        # print(f'❌ 内部错误: {file_path} 回测失败: {e}')
         return None
 
 def main_backtester():
@@ -268,8 +257,8 @@ def main_backtester():
     output_dir = now.strftime('%Y/%m')
     os.makedirs(output_dir, exist_ok=True)
     timestamp_str = now.strftime('%Y%m%d_%H%M%S')
-    # 文件名加入了 H30_RSI 标记
-    output_filename = f"backtest_results_25_daily_H30_MA20_Volume_RSI_{timestamp_str}.csv" 
+    # 文件名加入了 Breakout 标记
+    output_filename = f"backtest_results_25_daily_H30_Breakout_Volume_{timestamp_str}.csv" 
     output_path = os.path.join(output_dir, output_filename)
     
     results_df[['code', 'buy_date', 'sell_date', 'return']].to_csv(output_path, index=False, encoding='utf-8')
@@ -277,7 +266,7 @@ def main_backtester():
     print("\n" + "="*50)
     print("📈 回测完成")
     print(f"回测范围: **前 {MAX_STOCK_COUNT} 只股票**")
-    print(f"回测类型: 每日精确回测 (H=30 + MA20 趋势 + 成交量 + RSI 过滤)")
+    print(f"回测类型: 每日精确回测 (H=30 + 价格突破 + MA20 趋势 + 成交量过滤)")
     print(f"总交易次数 (信号数量): {total_trades}")
     print(f"平均回报率: {avg_return:.2%}")
     print(f"胜率 (回报率 > 0): {win_rate:.2%}")
