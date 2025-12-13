@@ -1,0 +1,48 @@
+name: 🧪 Strategy Backtest Analysis (RSI < 40 - Higher Signal Count)
+
+on:
+  # 仅通过手动触发运行回测
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: 'Reason for running historical backtest'
+        required: false
+        default: 'Backtest RSI < 40 strategy for higher signal count'
+        
+jobs:
+  run_backtest:
+    runs-on: ubuntu-latest
+    
+    defaults:
+      run:
+        shell: bash
+    
+    steps:
+      - name: ⬇️ Checkout repository code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 
+
+      - name: 🐍 Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x' 
+          
+      - name: ⚙️ Install dependencies (pandas & ta)
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas ta
+          
+      - name: 🏃 Run the Backtest Analysis Script (RSI 40)
+        # 调用新的回测脚本
+        run: python backtest_analysis_rsi40.py
+        
+      - name: 🔄 Commit and Push Backtest Report
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          file_pattern: 'backtest_results/**/*'
+          commit_message: "🤖 Auto: Generated historical backtest report for RSI < 40."
+          commit_user_name: 'github-actions[bot]'
+          commit_user_email: 'github-actions[bot]@users.noreply.github.com'
+          token: ${{ secrets.GITHUB_TOKEN }}
+          skip_dirty_check: false
