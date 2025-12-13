@@ -11,7 +11,7 @@ import sys
 STOCK_DATA_DIR = 'stock_data'
 MAX_STOCK_COUNT = 50      # 限制回测的股票文件数量为 50
 MAX_WORKERS = 4           # 保持 4 个线程
-HOLD_DAYS = 30            
+HOLD_DAYS = 60            
 BACKTEST_START_DATE = '2020-01-01'
 BACKTEST_END_DATE = '2025-12-13'    
 BACKTEST_STEP_DAYS = 1    # 每日回测
