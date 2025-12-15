@@ -15,22 +15,28 @@ MAX_CLOSE_PRICE = 20.0   # 最新收盘价不能高于 20.0 元
 OUTPUT_BASE_DIR = 'output'
 # -----------------
 
-# 全局变量用于存储股票名称，避免在多进程中重复加载
+# 全局变量用于存储股票名称
 STOCK_NAMES_DICT = {}
 
 def load_stock_names():
-    """在主进程中加载股票名称字典。"""
+    """
+    加载股票名称字典，修复兼容用户提供的 'code' 和 'name' 小写列名。
+    """
     global STOCK_NAMES_DICT
     try:
-        df_names = pd.read_csv(STOCK_NAMES_FILE, dtype={'Code': str})
-        # 假设 stock_names.csv 有两列：'Code' 和 'Name'
-        STOCK_NAMES_DICT = df_names.set_index('Code')['Name'].to_dict()
-    except FileNotFoundError:
-        print(f"警告：未找到股票名称文件 '{STOCK_NAMES_FILE}'。")
+        # >>> 修复点 1：使用小写 'code' 作为 dtype key <<<
+        df_names = pd.read_csv(STOCK_NAMES_FILE, dtype={'code': str})
+        
+        # >>> 修复点 2：使用小写 'code' set_index，使用小写 'name' 获取值 <<<
+        STOCK_NAMES_DICT = df_names.set_index('code')['name'].to_dict()
+        print(f"成功加载 {len(STOCK_NAMES_DICT)} 个股票名称。")
+    except Exception as e:
+        print(f"致命错误：读取股票名称文件失败。请确保文件名是 '{STOCK_NAMES_FILE}' 且包含小写 'code' 和 'name' (小写) 两列，并使用逗号分隔。")
+        raise # 抛出错误以确保问题被发现
 
 def check_stock_validity(stock_code, latest_close, stock_name):
     """
-    检查股票是否符合筛选范围和价格要求 (深沪A股, 价格 [5.0, 20.0], 排除ST/创业板)。
+    检查股票是否符合所有筛选要求：深沪A股, 价格 [5.0, 20.0], 排除ST/创业板。
     """
     
     # 1. 价格区间检查
@@ -45,8 +51,7 @@ def check_stock_validity(stock_code, latest_close, stock_name):
     if stock_code.startswith('30'):
         return False
 
-    # 4. 只保留标准的深沪 A 股 (6或0开头，排除科创板688、北交所8等，且非30开头)
-    # 标准A股通常为 600, 601, 603 (沪市A股) 或 000, 001, 002 (深市A股)
+    # 4. 只保留标准的深沪 A 股 (6开头沪市A股，0开头深市A股)
     if not (stock_code.startswith('6') or stock_code.startswith('0')):
         return False
         
@@ -55,51 +60,35 @@ def check_stock_validity(stock_code, latest_close, stock_name):
 def is_rising_three_methods(df):
     """
     判断 K 线序列是否符合“叠形多方炮” (Rising Three Methods) 形态。
-    
-
-[Image of Rising Three Methods Candlestick Pattern]
-
-    形态判断基于最后 5 根 K 线：
-    1. K1: 长阳线 (实体/范围 > 0.6)
-    2. K2, K3, K4: 小实体 K 线，其高低点范围完全被 K1 的**实体**包含。
-    3. K5: 长阳线，收盘价高于 K1 的最高价 (突破确认)。
     """
     if len(df) < 5:
         return False
 
-    # 取最后 5 个交易日的数据
     df_5 = df.iloc[-5:]
     if df_5[['Open', 'High', 'Low', 'Close']].isnull().any().any():
         return False
 
-    # K 线颜色：收盘 > 开盘 为阳线 (上涨)
     is_bullish_1 = df_5.iloc[0]['Close'] > df_5.iloc[0]['Open']
     is_bullish_5 = df_5.iloc[4]['Close'] > df_5.iloc[4]['Open']
     
-    # 1. K1 检查：长阳线
+    # 1. K1 检查：长阳线 (实体/范围 > 0.6)
     range_1 = df_5.iloc[0]['High'] - df_5.iloc[0]['Low']
     body_1 = abs(df_5.iloc[0]['Close'] - df_5.iloc[0]['Open'])
-    
-    # 判断 K1 是阳线且实体足够长
     if not (is_bullish_1 and range_1 > 0 and body_1 / range_1 > 0.6):
         return False
 
-    # 2. K2, K3, K4 检查：整理 K 线，且被 K1 实体包含
+    # 2. K2, K3, K4 检查：被 K1 实体包含
     middle_3 = df_5.iloc[1:4]
     body_low_1 = min(df_5.iloc[0]['Open'], df_5.iloc[0]['Close'])
     body_high_1 = max(df_5.iloc[0]['Open'], df_5.iloc[0]['Close'])
-    
-    # 检查中间 3 根 K 线的最高价和最低价是否完全在 K1 的实体范围内
     is_contained = (middle_3['High'].max() < body_high_1) and \
                    (middle_3['Low'].min() > body_low_1)
-    
     if not is_contained:
         return False
 
     # 3. K5 检查：长阳线突破
     is_breaking_out = (is_bullish_5) and \
-                      (df_5.iloc[4]['Close'] > df_5.iloc[0]['High']) # 收盘价突破K1最高价
-
+                      (df_5.iloc[4]['Close'] > df_5.iloc[0]['High'])
     if not is_breaking_out:
         return False
 
@@ -108,12 +97,15 @@ def is_rising_three_methods(df):
 def process_single_stock(file_path):
     """处理单个股票的 CSV 文件，检查形态和所有筛选条件。"""
     try:
-        # 从文件名中提取股票代码
         basename = os.path.basename(file_path)
         stock_code = basename.split('.')[0]
         
         # 1. 读取数据并排序
-        df = pd.read_csv(file_path, parse_dates=['Date'])
+        # >>> 修复点 3：重命名中文列名以匹配形态函数 <<<
+        df = pd.read_csv(file_path, parse_dates=['日期'], encoding='utf-8')
+        # 注意: 您的历史数据片段看起来是逗号分隔的，所以未添加 sep='\t'。如果仍有问题，请尝试添加 sep='\t'。
+        df = df.rename(columns={'日期': 'Date', '开盘': 'Open', '收盘': 'Close', 
+                                '最高': 'High', '最低': 'Low'})
         df = df.sort_values(by='Date').reset_index(drop=True)
         
         if df.empty:
@@ -122,18 +114,18 @@ def process_single_stock(file_path):
         latest_close = df.iloc[-1]['Close']
         stock_name = STOCK_NAMES_DICT.get(stock_code, '名称未知')
 
-        # 2. 检查股票的有效性 (代码、名称和价格)
+        # 2. 检查股票的有效性
         if not check_stock_validity(stock_code, latest_close, stock_name):
             return None
 
         # 3. 检查 K 线形态
         if is_rising_three_methods(df):
             latest_date = df.iloc[-1]['Date'].strftime('%Y-%m-%d')
+            # 返回结果字典，键名使用大写 'Code' 和 'StockName' 以便输出
             return {'Code': stock_code, 'StockName': stock_name, 'Date': latest_date, 'LatestClose': latest_close}
         
         return None
     except Exception as e:
-        # 实际运行时可以打印错误信息进行调试：
         # print(f"Error processing {file_path}: {e}")
         return None
 
@@ -154,22 +146,20 @@ def main():
     print(f"找到 {len(data_files)} 个股票文件，使用 {cpu_count()} 核心并行处理...")
     
     results = []
-    # 使用 Pool 进行并行计算
     with Pool(cpu_count()) as p:
         results = p.map(process_single_stock, data_files)
 
-    # 过滤掉 None 的结果
     filtered_results = [r for r in results if r is not None]
     
     if not filtered_results:
         print("扫描完成，未找到任何符合所有条件的股票。")
         return
 
-    # 4. 将结果转换为 DataFrame
+    # 4. 整理结果
     df_result = pd.DataFrame(filtered_results)
     print(f"扫描完成，找到 {len(df_result)} 个符合条件的股票。")
         
-    # 5. 准备输出文件路径 (年月目录, 文件名加时间戳, 上海时区)
+    # 5. 准备输出文件路径
     now = datetime.now(pd.to_datetime('now').tz_localize(TZ_SHANGHAI))
     
     output_dir = os.path.join(OUTPUT_BASE_DIR, now.strftime('%Y'), now.strftime('%m'))
