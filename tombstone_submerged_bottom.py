@@ -7,7 +7,7 @@ from multiprocessing import Pool, cpu_count
 STOCK_DATA_DIR = 'stock_data'
 STOCK_NAMES_FILE = 'stock_names.csv'
 MIN_CLOSE_PRICE = 5.0
-# K线最高点和最低点对齐的容忍度 (例如: 0.01 = 1%)
+MAX_CLOSE_PRICE = 20.0 # 新增：最高收盘价限制
 ALIGNMENT_TOLERANCE = 0.01
 
 def load_stock_names(file_path):
@@ -23,84 +23,113 @@ def load_stock_names(file_path):
         print(f"加载股票名称文件时出错: {e}")
         return {}
 
-def check_tombstone_submerged_bottom(df):
+def is_valid_stock(code, name):
     """
-    检查 '巨石沉底' 形态 (T, T-1, T-2 三日数据)。
-    df 必须是按日期降序排列的，且至少包含 3 行。
+    检查股票代码和名称是否符合深沪A股和排除条件。
     """
+    # 1. 排除 ST/ *ST
+    if 'ST' in name.upper() or '*' in name:
+        return False
+        
+    # 2. 排除创业板 (30开头)
+    if code.startswith('30'):
+        return False
+
+    # 3. 仅保留深沪A股 (60, 00开头的股票，排除30，通常排除20, 90等B股/指数/其他)
+    # 简化判断：只要不是 30 开头，且是 6位数字即可，因为数据源通常只包含A股。
+    # 更严格的A股判断：
+    # 沪市A股: 600xxx, 601xxx, 603xxx, 688xxx (科创板，但可能要保留)
+    # 深市A股: 000xxx, 001xxx, 002xxx, 003xxx
+    
+    # 排除科创板 (688) 和 B股/指数/其他 (20, 90, 8x, 5x, 1x等)
+    if code.startswith(('60', '00')):
+        return True
+    
+    # 由于您明确排除了 30 (创业板)，我们默认只保留 60 和 00，除非数据源包含其他A股代码。
+    # 稳妥起见，保留上述判断，确保只选取主流A股。
+    return False
+
+def check_tombstone_submerged_bottom(df, stock_code, stock_name):
+    """
+    在 K 线形态检查前，先进行最新的股价和类型检查。
+    """
+    # 0. 检查是否为有效股票（代码和名称）
+    if not is_valid_stock(stock_code, stock_name):
+        return False
+
     if len(df) < 3:
         return False
 
-    # 选取最近三天的 K 线数据
-    T_2 = df.iloc[2]  # T-2 (最老的一天)
-    T_1 = df.iloc[1]  # T-1 (中间一天)
-    T = df.iloc[0]    # T (最新一天)
+    T_2 = df.iloc[2]
+    T_1 = df.iloc[1]
+    T = df.iloc[0]
 
-    # 1. 股价要求：最新收盘价不能低于 MIN_CLOSE_PRICE
-    if T['Close'] < MIN_CLOSE_PRICE:
+    # 1. 股价范围要求：最新收盘价 (T['Close'])
+    if not (MIN_CLOSE_PRICE <= T['Close'] <= MAX_CLOSE_PRICE):
         return False
 
-    # 2. K 线实体方向要求
-    # 实体大小： abs(Close - Open)
-    is_T_2_bearish = T_2['Close'] < T_2['Open'] # T-2 阴线 (Red)
-    is_T_1_bullish = T_1['Close'] > T_1['Open'] # T-1 阳线 (Green)
-    is_T_bearish   = T['Close'] < T['Open']     # T 阴线 (Red)
+    # 2. K 线实体方向要求 (保持不变)
+    is_T_2_bearish = T_2['Close'] < T_2['Open']
+    is_T_1_bullish = T_1['Close'] > T_1['Open']
+    is_T_bearish   = T['Close'] < T['Open']
 
     if not (is_T_2_bearish and is_T_1_bullish and is_T_bearish):
         return False
 
-    # 3. 实体大小要求 (定性判断：T-1 小，T-2/T 大)
-    # T-1 实体相对较小
+    # 3. 实体大小要求 (保持不变)
     T_1_body_size = abs(T_1['Close'] - T_1['Open'])
     T_2_body_size = abs(T_2['Close'] - T_2['Open'])
     T_body_size = abs(T['Close'] - T['Open'])
-
-    # 设定一个阈值，确保 T-1 实体明显小于 T-2 和 T
+    
     if T_1_body_size * 2 > T_2_body_size or T_1_body_size * 2 > T_body_size:
-        # T-1 实体不能太接近 T-2 或 T 的实体
         return False
 
-
-    # 4. 高低点对齐要求 (巨石沉底的核心)
-    # 检查最低价 Low 的对齐
+    # 4. 高低点对齐要求 (保持不变)
     min_low = min(T['Low'], T_1['Low'], T_2['Low'])
     max_low = max(T['Low'], T_1['Low'], T_2['Low'])
-    # 检查最高价 High 的对齐 (图上虚线表示最高收盘价或最高价)
     min_high = min(T['High'], T_1['High'], T_2['High'])
     max_high = max(T['High'], T_1['High'], T_2['High'])
     
-    # 容忍度计算：(最大值 - 最小值) / 平均值 <= ALIGNMENT_TOLERANCE
+    # 容忍度计算
     avg_low = (T['Low'] + T_1['Low'] + T_2['Low']) / 3
     avg_high = (T['High'] + T_1['High'] + T_2['High']) / 3
 
+    # 避免除以零
+    if avg_low == 0 or avg_high == 0:
+        return False
+
     low_aligned = (max_low - min_low) / avg_low <= ALIGNMENT_TOLERANCE
-    high_aligned = (max_high - min_high) / avg_high <= ALIGNMENT_TOLERANCE
+    high_aligned = (max_high - min_high) / avg_high <= ALignment_TOLERANCE
 
     return low_aligned and high_aligned
 
-def process_file(file_path):
-    """单个文件的处理逻辑"""
+def process_file(file_path, stock_names):
+    """单个文件的处理逻辑，需要传入股票名称字典"""
     stock_code = os.path.splitext(os.path.basename(file_path))[0]
+    stock_name = stock_names.get(stock_code, '未知名称')
+    
+    # 预先筛选：如果代码或名称不符合基本条件，则不加载数据
+    if not is_valid_stock(stock_code, stock_name):
+        return None
+
     try:
-        # 假设 CSV 包含 Date, Open, High, Low, Close, Volume 等列
         df = pd.read_csv(
             file_path,
             parse_dates=['Date'],
             index_col='Date',
-            # 确保列名大写，或者根据您的实际文件调整
             dtype={'Open': float, 'High': float, 'Low': float, 'Close': float}
         )
         
-        # 按日期降序排序，确保最新数据在顶部
         df = df.sort_values(by='Date', ascending=False)
         
-        if check_tombstone_submerged_bottom(df):
-            # 获取最新的日期作为筛选日期
+        # 传入 stock_code 和 stock_name 进行检查
+        if check_tombstone_submerged_bottom(df, stock_code, stock_name):
             latest_date = df.iloc[0].name.strftime('%Y-%m-%d')
             latest_close = df.iloc[0]['Close']
             return stock_code, latest_date, latest_close
         
     except Exception as e:
+        # 排除那些因为数据格式不正确而导致的错误文件
         print(f"处理文件 {stock_code}.csv 时出错: {e}")
     
     return None
@@ -119,29 +148,36 @@ def main():
         print("未找到任何 CSV 数据文件，程序退出。")
         return
 
-    # 2. 并行处理文件
+    # 2. 加载股票名称 (并行处理前加载一次)
+    stock_names = load_stock_names(STOCK_NAMES_FILE)
+    
+    # 3. 并行处理文件
     print(f"开始扫描 {len(data_files)} 个文件，使用 {cpu_count()} 核心进行并行处理...")
     
-    with Pool(cpu_count()) as pool:
-        # 使用 pool.map 并行处理所有文件
-        results = pool.map(process_file, data_files)
+    # 为 Pool.map 准备参数列表 (文件路径 + 名称字典)
+    # 由于 Pool.map 只能接受单个迭代器参数，我们使用 lambda/partial 或 tuple 传递，
+    # 但在 Pool 的场景下，最好是**修改 process_file 接收两个参数**并在 Pool 外包装。
+    # 为了简化，我们使用一个包装函数传递 stock_names
+    
+    def process_wrapper(file_path):
+        return process_file(file_path, stock_names)
 
-    # 3. 收集并整理结果
+    with Pool(cpu_count()) as pool:
+        results = pool.map(process_wrapper, data_files)
+
+    # 4. 收集并整理结果
     filtered_stocks = [res for res in results if res is not None]
 
     if not filtered_stocks:
-        print("未找到符合 '巨石沉底' 形态的股票。")
+        print("未找到符合所有条件的股票。")
         return
         
-    # 4. 加载股票名称
-    stock_names = load_stock_names(STOCK_NAMES_FILE)
-
     results_df = pd.DataFrame(
         filtered_stocks,
         columns=['Code', 'Date', 'Latest_Close']
     )
     
-    # 匹配股票名称
+    # 匹配股票名称 (在主线程完成)
     results_df['Name'] = results_df['Code'].apply(lambda c: stock_names.get(c, '未知名称'))
     
     # 重新排序输出列
@@ -169,7 +205,6 @@ def main():
     print(f"总耗时: {datetime.now() - start_time}")
 
 if __name__ == '__main__':
-    # 确保 stock_data 目录存在，如果是在 GitHub Actions 中，需要确保文件已 checkout
     if not os.path.isdir(STOCK_DATA_DIR):
         print(f"错误: 找不到数据目录 '{STOCK_DATA_DIR}'，请检查工作流配置。")
     else:
