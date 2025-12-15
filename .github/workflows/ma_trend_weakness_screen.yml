@@ -1,0 +1,60 @@
+# .github/workflows/ma_trend_weakness_screen.yml
+
+name: 📈 均线弱势筛选器 (MA Trend Weakness Screen)
+
+on:
+  # 1. 手动触发
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: '手动运行的原因 (可选)'
+        required: false
+        default: 'Manual run by user'
+
+  # 2. 代码变动触发 (脚本或工作流文件变动时)
+  push:
+    branches:
+      - main # 假设您的主分支是 main
+    paths:
+      - 'ma_trend_weakness_screen.py'
+      - '.github/workflows/ma_trend_weakness_screen.yml'
+
+  # 3. 定时触发：每天 18:00 北京时间 (UTC+8)
+  # 18:00 BJT 等同于 10:00 UTC (cron 表达式以 UTC 为基准)
+  schedule:
+    - cron: '0 10 * * *'
+
+jobs:
+  run_screening_and_push:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 🛎️ 检出代码 (Checkout repository)
+        uses: actions/checkout@v4
+        with:
+          # 必须开启 fetch-depth: 0 才能让 git-auto-commit-action 正确工作
+          fetch-depth: 0 
+
+      - name: 🐍 设置 Python 环境 (Set up Python)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: ⚙️ 安装依赖库 (Install dependencies)
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas pytz
+
+      - name: 🚀 运行股票筛选脚本 (Run stock screening script)
+        run: python ma_trend_weakness_screen.py
+        
+      - name: 💾 提交筛选结果到仓库 (Commit and push results)
+        # 使用 git-auto-commit-action 自动将新生成的 CSV 文件推送到仓库
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          # 仅提交新生成的 CSV 文件和其所在的目录 (YYYY/MM/)
+          file_pattern: '**/*.csv'
+          commit_message: '🤖 Auto: 股票均线弱势筛选结果更新 (MA Trend Weakness Screen)'
+          # 确保提交用户名和邮箱设置正确
+          commit_author: 'GitHub Actions <actions@github.com>'
+          # 不指定 branch，默认为当前分支
