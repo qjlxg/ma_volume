@@ -12,7 +12,13 @@ import pytz
 STOCK_DATA_DIR = 'stock_data'
 STOCK_NAMES_FILE = 'stock_names.csv'
 OUTPUT_BASE_DIR = 'scan_results'
+
+# 价格和板块筛选条件
 MIN_CLOSING_PRICE = 5.0
+MAX_CLOSING_PRICE = 20.0
+EXCLUDED_PREFIXES = ('30',)  # 排除 30 开头的股票代码 (创业板)
+INCLUDED_PREFIXES = ('60', '00') # 仅保留 60 (沪市), 00 (深市) 开头
+
 # 设置时区为上海/北京时间
 SHANGHAI_TZ = pytz.timezone('Asia/Shanghai')
 
@@ -29,6 +35,30 @@ def load_stock_names():
         print(f"读取 {STOCK_NAMES_FILE} 失败: {e}")
         return {}
 
+def check_stock_criteria(stock_code: str, stock_name: str, latest_close: float) -> bool:
+    """检查股票是否符合额外的筛选标准：价格、板块和 ST 排除"""
+
+    # 1. 板块排除：排除 30 开头，且只保留 60, 00 开头
+    if stock_code.startswith(EXCLUDED_PREFIXES):
+        # print(f"排除 {stock_code}: 创业板 (30开头)") # 调试用
+        return False
+    if not stock_code.startswith(INCLUDED_PREFIXES):
+        # print(f"排除 {stock_code}: 非深沪A股 (非60/00开头)") # 调试用
+        return False
+
+    # 2. 价格限定：5.0 元 <= 最新收盘价 <= 20.0 元
+    if not (MIN_CLOSING_PRICE <= latest_close <= MAX_CLOSING_PRICE):
+        # print(f"排除 {stock_code}: 价格 ({latest_close} 不在 5.0-20.0 范围内)") # 调试用
+        return False
+
+    # 3. 排除 ST 股
+    if 'ST' in stock_name.upper() or '*ST' in stock_name.upper():
+        # print(f"排除 {stock_code}: ST股") # 调试用
+        return False
+
+    return True
+
+
 def check_giant_rock_bottom(df: pd.DataFrame, stock_code: str, names_map: dict) -> list:
     """
     检查数据集中是否存在“巨石沉底”形态。
@@ -38,7 +68,7 @@ def check_giant_rock_bottom(df: pd.DataFrame, stock_code: str, names_map: dict) 
         - max(C2.O, C2.C) < min(C1.O, C1.C)
     3. C3 (Day N): 阳线 (Close > Open)，且收盘价高于 C1 开盘价 (强势反转).
         - C3.Close > C1.Open
-    4. 额外条件：C3收盘价 >= 5.0 元。
+    4. 额外条件：符合价格、板块和 ST 排除。
     """
     results = []
 
@@ -53,10 +83,14 @@ def check_giant_rock_bottom(df: pd.DataFrame, stock_code: str, names_map: dict) 
     C1 = recent_data.iloc[0]  # N-2
     C2 = recent_data.iloc[1]  # N-1
     C3 = recent_data.iloc[2]  # N (最新交易日)
+    
+    stock_name = names_map.get(stock_code, '未知名称')
 
-    # 4. 最新收盘价不能低于 5.0 元
-    if C3['Close'] < MIN_CLOSING_PRICE:
+    # --- 增加外部条件筛选 ---
+    if not check_stock_criteria(stock_code, stock_name, C3['Close']):
         return results
+
+    # --- 巨石沉底形态判断 ---
 
     # 1. C1: 阴线
     is_c1_bearish = C1['Close'] < C1['Open']
@@ -65,18 +99,17 @@ def check_giant_rock_bottom(df: pd.DataFrame, stock_code: str, names_map: dict) 
     c1_body_low = min(C1['Open'], C1['Close'])
     c2_body_high = max(C2['Open'], C2['Close'])
     is_c2_sunken = c2_body_high < c1_body_low
-    # 辅助条件：C2实体相对C1较小
+    # 辅助条件：C2实体相对C1较小 (避免极端情况，增强形态识别的可靠性)
     c1_body_size = abs(C1['Open'] - C1['Close'])
     c2_body_size = abs(C2['Open'] - C2['Close'])
     is_c2_small_body = c2_body_size < 0.5 * c1_body_size
 
-    # 3. C3: 阳线且强势反转
+    # 3. C3: 阳线且强势反转 (吞没或强劲拉升)
     is_c3_bullish = C3['Close'] > C3['Open']
-    is_c3_strong_reversal = C3['Close'] > C1['Open']
+    is_c3_strong_reversal = C3['Close'] > C1['Open'] # 收盘价高于 C1 开盘价
 
     # 综合判断
     if is_c1_bearish and is_c2_sunken and is_c2_small_body and is_c3_bullish and is_c3_strong_reversal:
-        stock_name = names_map.get(stock_code, '未知名称')
         latest_date = C3['Date'] if 'Date' in C3 else 'N/A'
         results.append({
             '代码': stock_code,
@@ -91,6 +124,11 @@ def check_giant_rock_bottom(df: pd.DataFrame, stock_code: str, names_map: dict) 
 def process_file(file_path: Path, names_map: dict) -> list:
     """处理单个 CSV 文件，筛选形态"""
     stock_code = file_path.stem  # 文件名即为股票代码
+    
+    # 提前进行简单的代码前缀检查，提高效率
+    if not stock_code.startswith(INCLUDED_PREFIXES) or stock_code.startswith(EXCLUDED_PREFIXES):
+        return []
+        
     try:
         # 假设 CSV 列名包含 'Date', 'Open', 'High', 'Low', 'Close', 'Volume'
         df = pd.read_csv(file_path)
@@ -104,6 +142,7 @@ def process_file(file_path: Path, names_map: dict) -> list:
 def main():
     start_time = datetime.now(SHANGHAI_TZ)
     print(f"--- 巨石沉底形态扫描开始 ({start_time.strftime('%Y-%m-%d %H:%M:%S %Z')}) ---")
+    print(f"筛选条件：价格 [{MIN_CLOSING_PRICE:.2f}-{MAX_CLOSING_PRICE:.2f}] 元，排除 ST 和 30 开头。")
 
     # 1. 加载股票名称
     names_map = load_stock_names()
@@ -130,7 +169,7 @@ def main():
 
     # 4. 结果处理和保存
     if not all_results:
-        print("未找到符合 '巨石沉底' 形态的股票。")
+        print("未找到符合 '巨石沉底' 形态和筛选条件的股票。")
         return
 
     results_df = pd.DataFrame(all_results)
@@ -158,6 +197,4 @@ def main():
     print(f"总耗时: {duration.total_seconds():.2f} 秒")
 
 if __name__ == '__main__':
-    # 示例用法：确保 stock_data 目录下有您的 CSV 文件，且 stock_names.csv 存在于根目录
-    # 例如：stock_data/603693.csv, stock_data/603456.csv 等
     main()

@@ -51,7 +51,7 @@ jobs:
       - name: 📦 Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pandas glob multiprocessing pytz
+          pip install pandas pytz
 
       - name: ⚙️ Run Shovel Bottom Scan Script
         # 运行脚本

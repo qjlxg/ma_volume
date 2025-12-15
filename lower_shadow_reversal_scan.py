@@ -9,11 +9,12 @@ import pytz
 # --- 配置 ---
 STOCK_DATA_DIR = 'stock_data'
 STOCK_NAMES_FILE = 'stock_names.csv'
-MIN_CLOSE_PRICE = 5.0
 
-# --- 筛选条件收紧 ---
-LOWER_SHADOW_RATIO = 0.75  # 增加到 75%，下影线必须占据总价格区间的 75% 以上
-MIN_TURNOVER_RATE = 1.0    # 新增条件：要求当日换手率至少为 1.0%
+# --- 筛选条件收紧和限定 ---
+MIN_CLOSE_PRICE = 5.0
+MAX_CLOSE_PRICE = 20.0  # 新增：收盘价不高于 20.0 元
+LOWER_SHADOW_RATIO = 0.75
+MIN_TURNOVER_RATE = 1.0
 
 # --- 中文列名映射 ---
 COLUMNS_MAP = {
@@ -21,45 +22,81 @@ COLUMNS_MAP = {
     'Close': '收盘',
     'High': '最高',
     'Low': '最低',
-    'TurnoverRate': '换手率' # 引入换手率的中文列名
+    'TurnoverRate': '换手率'
 }
 REQUIRED_COLS = list(COLUMNS_MAP.values())
 
 # 设置日志
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
 
 def load_stock_names(filepath):
-    # ... (此函数未更改) ...
+    """加载股票代码和名称的映射表，并返回包含代码、名称的 DataFrame"""
     try:
+        # 假设 stock_names.csv 包含 'code' 和 'name' 列
         df = pd.read_csv(filepath, dtype={'code': str})
         df['code'] = df['code'].apply(lambda x: x.zfill(6))
-        return df.set_index('code')['name'].to_dict()
+        
+        # 将代码和名称作为字典返回，用于后续匹配
+        names_dict = df.set_index('code')['name'].to_dict()
+        
+        # 返回用于排除 ST 股的完整DataFrame
+        return df, names_dict 
     except Exception as e:
         logging.error(f"加载股票名称文件失败: {e}")
-        return {}
+        return pd.DataFrame(), {}
 
-def process_file(file_path):
+def check_exclusions(stock_code, stock_name):
+    """
+    检查股票是否符合排除条件（ST股、创业板、非A股）
+    返回 True 表示排除，False 表示保留
+    """
+    # 1. 排除 ST 股
+    if '*ST' in stock_name or 'ST' in stock_name:
+        return True, "ST 股"
+
+    # 2. 排除 300 开头（创业板）
+    if stock_code.startswith('300'):
+        return True, "创业板 (300开头)"
+        
+    # 3. 只保留深沪A股（主板和科创板，但创业板已排除）
+    # A股代码范围通常是：
+    # 600, 601, 603, 605, 688 开头 (沪市)
+    # 000, 001, 002, 003 开头 (深市)
+    if not (stock_code.startswith(('60', '68')) or stock_code.startswith(('00', '30'))):
+        # 排除所有非上述开头的代码，如900（B股）、200（B股）等
+        return True, "非深沪A股"
+
+    # 3. 排除其他非A股（如B股、新三板等，此条件主要由上面的代码开头检查覆盖，但可以更精细化）
+    # 确保是A股代码，避免误选如北交所 8/4 开头等
+    if stock_code.startswith(('1', '2', '4', '8', '9')): 
+        return True, "非深沪A股"
+
+    return False, "" # 保留
+
+def process_file(file_path, stock_names_dict):
     """
     处理单个 CSV 文件，筛选符合条件的股票。
     """
     try:
         basename = os.path.basename(file_path)
         stock_code = os.path.splitext(basename)[0].zfill(6)
+        stock_name = stock_names_dict.get(stock_code, '未知名称')
+
+        # --- 0. 排除股票类型检查 ---
+        should_exclude, reason = check_exclusions(stock_code, stock_name)
+        if should_exclude:
+            # logging.debug(f"Code {stock_code} excluded: {reason}") # 调试时可开启
+            return None
         
-        # 增加换手率列的检查
-        current_required_cols = REQUIRED_COLS
         df = pd.read_csv(file_path, engine='python')
 
         if df.empty:
-            logging.warning(f"文件 {basename} 是空的。跳过。")
             return None
 
         # --- 鲁棒性增强：检查必需的中文列 (包含换手率) ---
-        if not all(col in df.columns for col in current_required_cols):
-            missing_cols = [col for col in current_required_cols if col not in df.columns]
-            logging.warning(f"文件 {basename} (代码: {stock_code}) 缺少必需的中文列: {missing_cols}。跳过。")
+        if not all(col in df.columns for col in REQUIRED_COLS):
+            # 警告在之前运行中已记录，此处跳过以加速
             return None
-        # --- 鲁棒性增强结束 ---
         
         latest_data = df.iloc[-1]
         
@@ -70,11 +107,11 @@ def process_file(file_path):
         low = latest_data[COLUMNS_MAP['Low']]
         turnover_rate = latest_data[COLUMNS_MAP['TurnoverRate']]
 
-        # 1. 最新收盘价不能低于 5.0 元
-        if close < MIN_CLOSE_PRICE:
+        # 1. 价格区间限定
+        if not (MIN_CLOSE_PRICE <= close <= MAX_CLOSE_PRICE):
             return None
         
-        # 2. 新增条件：换手率必须高于 MIN_TURNOVER_RATE
+        # 2. 换手率必须高于 MIN_TURNOVER_RATE
         if turnover_rate < MIN_TURNOVER_RATE:
             return None
             
@@ -97,16 +134,17 @@ def process_file(file_path):
         return None
 
     except Exception as e:
+        # 捕获其他可能的错误
         logging.warning(f"处理文件 {file_path} 时发生错误: {e}")
         return None
 
 def main():
     start_time = datetime.now()
-    logging.info("--- 启动股票筛选程序 (已收紧条件) ---")
+    logging.info("--- 启动股票筛选程序 (最终限定条件) ---")
     
-    # 1. 加载股票名称映射
-    stock_names = load_stock_names(STOCK_NAMES_FILE)
-    if not stock_names:
+    # 1. 加载股票名称映射 (包含用于排除 ST 股的完整列表)
+    stock_names_df, stock_names_dict = load_stock_names(STOCK_NAMES_FILE)
+    if stock_names_df.empty:
         logging.error("无法获取股票名称数据，程序终止。")
         return
 
@@ -121,8 +159,12 @@ def main():
     logging.info(f"找到 {len(all_files)} 个数据文件，开始并行处理...")
 
     # 3. 使用多进程并行处理
+    # 传递 stock_names_dict 给 process_file 函数
+    process_args = [(f, stock_names_dict) for f in all_files]
+    
     with Pool(cpu_count()) as pool:
-        results = pool.map(process_file, all_files)
+        # pool.starmap 用于传递多个参数
+        results = pool.starmap(process_file, process_args)
 
     # 4. 收集和整理结果
     filtered_codes = [code for code in results if code is not None]
@@ -133,11 +175,11 @@ def main():
     else:
         result_list = []
         for code in filtered_codes:
-            name = stock_names.get(code, '未知名称')
+            name = stock_names_dict.get(code, '未知名称')
             result_list.append({'Code': code, 'Name': name})
         
-        result_df = pd.DataFrame(result_list)
-        logging.info(f"筛选到 {len(result_df)} 个符合条件的股票。")
+        result_df = pd.DataFrame(result_list).drop_duplicates(subset=['Code']) # 去重
+        logging.info(f"筛选到 {len(result_df)} 个符合最终限定条件的股票。")
 
     # 5. 生成带时间戳的输出文件名并保存
     shanghai_tz = pytz.timezone('Asia/Shanghai')
@@ -150,7 +192,6 @@ def main():
     output_filename = f"result_{timestamp_str}.csv"
     output_path = os.path.join(output_dir, output_filename)
     
-    # 保存结果
     result_df.to_csv(output_path, index=False, encoding='utf-8')
     logging.info(f"筛选结果已保存至: {output_path}")
     
