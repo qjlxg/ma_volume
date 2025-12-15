@@ -149,7 +149,7 @@ def process_file(file_path, stock_names):
 
 def main():
     start_time = datetime.now(TIMEZONE)
-    print(f"Starting scan at {start_time.strftime('%Y-%m-%d %H:%M:%S')} ({TIMEZONE.tzname(start_time)})")
+    print(f"Starting scan at {start_time.strftime('%Y-%m-%d %H:%M:%S')} ({start_time.tzname()})")
     
     # 1. 加载股票名称
     stock_names = load_stock_names(STOCK_NAMES_FILE)
