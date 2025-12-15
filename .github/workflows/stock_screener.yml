@@ -1,0 +1,87 @@
+name: 📈 Stock Screener: Low Cost Christmas Pattern
+
+# 触发条件
+on:
+  # 1. 定时触发：每天 18:00 (北京时间) / 10:00 (UTC)
+  # GitHub Actions 定时任务使用 UTC 时间，北京时间 (BJT) 是 UTC+8
+  schedule:
+    # 每天 18:00 BJT = 每天 10:00 UTC
+    - cron: '0 10 * * *' 
+  
+  # 2. 手动触发 (workflow_dispatch)
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: 'Manual run reason (Shanghai Time Zone Check)'
+        required: false
+        default: 'Manual trigger for immediate screening'
+
+  # 3. 脚本或工作流变动时自动运行 (push/pull_request)
+  push:
+    branches:
+      - main  # 监听 main 分支的推送
+    paths:
+      - 'filter_stocks.py' # 脚本变动
+      - '.github/workflows/stock_screener.yml' # 工作流变动
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'filter_stocks.py'
+      - '.github/workflows/stock_screener.yml'
+
+jobs:
+  filter_and_commit:
+    runs-on: ubuntu-latest
+    
+    # 设置工作环境的时区为上海时区 (Asia/Shanghai)
+    # 这确保了 Python 脚本中的 datetime.now(pytz.timezone('Asia/Shanghai')) 结果正确
+    env:
+      TZ: Asia/Shanghai
+
+    steps:
+      - name: ⬇️ Checkout Repository (Fetch History)
+        uses: actions/checkout@v4
+        # 必须拉取完整的历史记录 (fetch-depth: 0)，以便后续的 git push 操作
+        with:
+          fetch-depth: 0
+
+      - name: ⚙️ Setup Python Environment
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: 📦 Install Python Dependencies
+        run: |
+          # 安装必要的Python库：pandas (数据处理), pytz (时区), multiprocessing (并行)
+          python -m pip install --upgrade pip
+          pip install pandas pytz 
+
+      - name: 🏃 Run Stock Filter Script
+        # 运行 Python 脚本。它将自动创建 results/年-月/ 文件。
+        run: python filter_stocks.py
+        
+      - name: 💾 Configure Git for Commit
+        # 配置 Git 用户信息，用于自动提交
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com # 使用标准的 bot 邮箱
+
+      - name: 🚀 Commit and Push Results
+        # 检查是否有新的筛选结果文件生成并提交
+        run: |
+          # 检查 results/ 目录下是否有变化 (新增或修改文件)
+          if git status --porcelain | grep 'results/'; then
+            echo "New or modified results found, staging files..."
+            git add results/
+            
+            # 使用上海时区的时间作为 commit 信息
+            COMMIT_TIME=$(date '+%Y-%m-%d %H:%M:%S %Z')
+            git commit -m "📈 Auto-Screen: Results pushed at ${COMMIT_TIME} (Shanghai)"
+            
+            echo "Committing and pushing results..."
+            git push
+            echo "Results pushed successfully to main branch."
+          else
+            echo "No changes in results directory. Nothing to commit."
+          fi
