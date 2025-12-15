@@ -1,6 +1,6 @@
 # 文件名: .github/workflows/bottom_double_bullish_scanner.yml
 
-name: '底部双倍阳: K线形态扫描器'
+name: '底部双倍阳'
 
 # 触发条件配置
 on:

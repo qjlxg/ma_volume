@@ -1,4 +1,4 @@
-name: 📈 Rising Three Methods Scanner (叠形多方炮)
+name: 📈叠形
 
 # 工作流的名称与脚本名称一致，便于区分
 run-name: ${{ github.event_name == 'workflow_dispatch' && format('手动运行 - 叠形多方炮扫描') || format('{0} 触发 - 叠形多方炮扫描', github.event_name) }}

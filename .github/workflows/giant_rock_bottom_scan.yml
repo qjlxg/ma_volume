@@ -1,5 +1,5 @@
 # .github/workflows/giant_rock_bottom_scan.yml
-name: 巨石沉底K线形态扫描
+name: 巨石沉底
 
 # 1. 触发条件配置
 on:

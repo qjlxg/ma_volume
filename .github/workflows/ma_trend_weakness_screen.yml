@@ -1,6 +1,6 @@
 # .github/workflows/ma_trend_weakness_screen.yml
 
-name: 📈 均线弱势筛选器 (MA Trend Weakness Screen)
+name: 弱势
 
 on:
   # 1. 手动触发

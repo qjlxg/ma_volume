@@ -1,5 +1,5 @@
 # .github/workflows/volume_bottom_scanner.yml
-name: Volume Bottom Scanner (缩量见底筛选)
+name: Volume Bottom Scanner 缩量见底
 
 on:
   # 1. 定时触发：每天 18:00 (北京时间) 运行

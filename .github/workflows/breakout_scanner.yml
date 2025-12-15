@@ -1,4 +1,4 @@
-name: Breakout Scanner (股票突破形态筛选)
+name: Breakout Scanner 突破
 
 on:
   # 1. 手动触发
