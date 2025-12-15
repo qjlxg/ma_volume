@@ -1,0 +1,90 @@
+name: 叠形多方炮形态扫描器
+
+# 脚本和工作流文件名统一
+run-name: 股票形态扫描: ${{ github.event_name }} triggered by @${{ github.actor }}
+
+# 触发条件
+on:
+  # 1. 手动触发
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: '手动触发原因 (可选)'
+        required: false
+        default: 'Manual run for stock scan'
+        
+  # 2. 定时触发 (每天 18:00 北京时间/上海时间)
+  # 注意：GitHub Actions 默认使用 UTC，这里设置 UTC+8 的 18:00
+  # UTC 时间是 18:00 - 8小时 = 10:00 UTC
+  schedule:
+    - cron: '0 10 * * *' # 每天 UTC 10:00，即北京时间 18:00
+    
+  # 3. 自动触发 (当脚本或工作流文件变动时)
+  push:
+    branches: [ main, master ]
+    paths:
+      - 'stacked_multi_cannon_scanner.py'
+      - '.github/workflows/stacked_multi_cannon_scanner.yml'
+  pull_request:
+    branches: [ main, master ]
+    paths:
+      - 'stacked_multi_cannon_scanner.py'
+      - '.github/workflows/stacked_multi_cannon_scanner.yml'
+
+jobs:
+  run_scanner_and_push:
+    runs-on: ubuntu-latest
+    
+    # 设置时区为上海，确保 Python 脚本中的时间戳正确
+    env:
+      TZ: Asia/Shanghai
+
+    steps:
+      - name: 📥 检出代码
+        uses: actions/checkout@v4
+        # 需要 token 来推送结果到仓库
+        with:
+          fetch-depth: 0 
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 🐍 设置 Python 环境
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: 🛠 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          # 安装 pandas 和 pytz 库
+          pip install pandas pytz
+          
+      # ⚠️ 假设 stock_data 目录和 stock_names.csv 文件已经存在于仓库根目录
+      # 如果文件不存在，你需要添加额外的步骤来获取这些数据
+
+      - name: 🏃 运行股票扫描脚本
+        # 如果 stock_data 或 stock_names.csv 不存在，脚本会报错并退出
+        run: python stacked_multi_cannon_scanner.py
+        
+      - name: 📂 检查变动并配置 Git
+        # 这一步检查是否有新的结果文件生成
+        id: git_status
+        run: |
+          # 配置 Git 用户，用于提交
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          # 添加所有新生成的结果文件 (在 scan_results 目录下)
+          git add scan_results/
+          # 检查是否有文件变动
+          if git diff --cached --exit-code; then
+            echo "::set-output name=files_changed::false"
+          else
+            echo "::set-output name=files_changed::true"
+          fi
+          
+      - name: ⬆️ 推送结果到仓库
+        # 只有当有新结果文件时才执行推送
+        if: steps.git_status.outputs.files_changed == 'true'
+        run: |
+          now=$(TZ=Asia/Shanghai date +'%Y-%m-%d %H:%M:%S')
+          git commit -m "🤖 自动扫描: 叠形多方炮形态结果 - ${now}"
+          git push
