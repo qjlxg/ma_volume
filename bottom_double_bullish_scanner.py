@@ -1,4 +1,4 @@
-# 文件名: bottom_double_bullish_scanner.py - 修正版本
+# 文件名: bottom_double_bullish_scanner.py - V3.0 (放宽条件版)
 
 import pandas as pd
 import glob
@@ -20,18 +20,26 @@ COLUMN_MAP = {
     '最高': 'High',
     '最低': 'Low',
     '成交量': 'Volume',
-    '成交额': 'Amount', # 虽然Amount（成交额）未使用，但读取时包含
+    '成交额': 'Amount', 
 }
+
+# --- 关键筛选参数 ---
+# 【调整参数 1】：阳线涨幅要求 (C1 和 C2 信号)
+MIN_BULLISH_CHANGE = 0.01  # 调整为 1.0% (原 2.0%)
+# 【调整参数 2】：放量倍数要求 (C1 信号)
+MIN_VOL_MULTIPLIER = 1.2   # 调整为 1.2 倍于20日均量 (原 1.5 倍)
+# 【保持不变】：C2 成交量必须 >= C1 成交量
+# 【保持不变】：C2 收盘价必须 > C1 收盘价
+# 【保持不变】：底部趋势检查 (T-20 日收盘价)
+# 【保持不变】：回调限制 (T-1 日收盘价 >= C1 日收盘价 * 0.95)
 
 # ------------------------------------
 
 def load_stock_names(filepath):
     """加载股票代码和名称的映射"""
     try:
-        # 使用 utf-8-sig (BOM) 编码读取，以兼容 Excel 保存的中文 CSV 文件
         names_df = pd.read_csv(filepath, encoding='utf-8-sig', dtype={'code': str})
         
-        # 确保列名是 code 和 name
         if 'code' not in names_df.columns or 'name' not in names_df.columns:
              print("错误: stock_names.csv 必须包含 'code' 和 'name' 两列。")
              return {}
@@ -46,10 +54,6 @@ def load_stock_names(filepath):
 def check_bottom_double_bullish(df: pd.DataFrame, stock_code: str, names_map: dict) -> list:
     """
     检查单个股票数据是否满足“底部双倍阳”条件
-    :param df: 包含 ['Date', 'Open', 'High', 'Low', 'Close', 'Volume'] 的数据框
-    :param stock_code: 股票代码
-    :param names_map: 股票代码-名称映射
-    :return: 满足条件的信号列表 (Code, Name, Date)
     """
     # 确保数据按日期升序排列
     df = df.sort_values(by='Date').reset_index(drop=True)
@@ -73,10 +77,10 @@ def check_bottom_double_bullish(df: pd.DataFrame, stock_code: str, names_map: di
     # 3. 第一次阳线 (C1) 信号 - T-4 日
     C1_day = df.shift(-4) # 检查 T-4 日的数据
     
-    # T-4 日为阳线且涨幅 >= 2%
-    C1_is_bullish = C1_day['Change_C'] >= 0.02 
-    # T-4 日放量 (Volume >= AvgVolume * 1.5)
-    C1_is_high_vol = C1_day['Volume'] >= C1_day['Vol_Avg_20'] * 1.5
+    # 【修改点 1】：T-4 日为阳线且涨幅 >= MIN_BULLISH_CHANGE
+    C1_is_bullish = C1_day['Change_C'] >= MIN_BULLISH_CHANGE 
+    # 【修改点 2】：T-4 日放量 (Volume >= AvgVolume * MIN_VOL_MULTIPLIER)
+    C1_is_high_vol = C1_day['Volume'] >= C1_day['Vol_Avg_20'] * MIN_VOL_MULTIPLIER
     
     df['Is_C1'] = C1_is_bullish & C1_is_high_vol
     
@@ -87,8 +91,8 @@ def check_bottom_double_bullish(df: pd.DataFrame, stock_code: str, names_map: di
     
     # 5. 第二次阳线 (C2) 确认 - T 日 (最新日)
     
-    # T 日为阳线且涨幅 >= 2%
-    C2_is_bullish = df['Change_C'] >= 0.02
+    # 【修改点 3】：T 日为阳线且涨幅 >= MIN_BULLISH_CHANGE
+    C2_is_bullish = df['Change_C'] >= MIN_BULLISH_CHANGE
     # T 日成交量 >= C1 日成交量
     C2_is_higher_vol = df['Volume'] >= C1_day['Volume']
     # T 日收盘价 > C1 日收盘价
@@ -97,19 +101,15 @@ def check_bottom_double_bullish(df: pd.DataFrame, stock_code: str, names_map: di
     df['Is_C2'] = C2_is_bullish & C2_is_higher_vol & C2_new_high
     
     # 6. 综合所有条件
-    # C1 必须发生，且 T-1 日的震荡/回调条件满足，且 C2 发生
-    # 仅检查最后一行数据是否满足信号
-    signal_mask = df.index == df.index[-1] # 只关注最后一行数据
+    # 仅关注最后一行数据
+    signal_mask = df.index == df.index[-1] 
     
-    # 确保前一个条件成立 (Is_Downtrend 是 T-20 日与 T 日比较，适用于最新数据)
     signal_mask &= df['Is_Downtrend'] & df['Is_C1'] & df['Consolidation_OK'] & df['Is_C2']
 
-    # 找到最新一个满足条件的日期
     latest_signal = df[signal_mask].iloc[-1] if signal_mask.any() else None
 
     results = []
     if latest_signal is not None:
-        # 返回信号当日的日期 (C2 日期)
         signal_date = latest_signal['Date']
         stock_name = names_map.get(stock_code, '未知名称')
         results.append({
@@ -144,24 +144,17 @@ def main():
 
     # 4. 扫描所有 CSV 文件
     csv_files = glob.glob(os.path.join(STOCK_DATA_DIR, '*.csv'))
-    
     all_results = []
     
     print(f"找到 {len(csv_files)} 个股票数据文件，开始扫描...")
 
     for i, file_path in enumerate(csv_files):
-        # 从文件名获取股票代码 (例如: 'stock_data/603693.csv' -> '603693')
         stock_code = os.path.basename(file_path).split('.')[0]
         
         try:
-            # === 核心修改点 1: 读取数据时指定列名和日期解析 ===
-            # 使用 utf-8-sig (BOM) 编码读取，以兼容 Excel 保存的中文 CSV 文件
+            # 读取数据并重命名列
             df = pd.read_csv(file_path, encoding='utf-8-sig', parse_dates=['日期'])
-            
-            # === 核心修改点 2: 重命名列名，便于后续代码处理 ===
             df = df.rename(columns=COLUMN_MAP)
-            
-            # 仅保留需要的列
             df = df[['Date', 'Open', 'Close', 'High', 'Low', 'Volume']].dropna()
             
             # 运行分析
@@ -169,23 +162,21 @@ def main():
             all_results.extend(results)
             
         except Exception as e:
-            # 打印导致错误的列名映射，帮助用户排查
+            # 打印错误，但继续处理下一个文件
             print(f"处理文件 {file_path} 时发生错误: {e}")
             
     # 5. 保存结果
     if all_results:
         results_df = pd.DataFrame(all_results)
-        results_df = results_df[['代码', '名称', '信号日期', '最新收盘价']] # 调整列顺序
-        # 使用 utf-8-sig 编码保存，确保中文在 Windows/Excel 中显示正常
+        results_df = results_df[['代码', '名称', '信号日期', '最新收盘价']] 
         results_df.to_csv(output_filepath, index=False, encoding='utf-8-sig')
         print(f"\n筛选完成。找到 {len(all_results)} 个信号，结果已保存至: {output_filepath}")
     else:
         print("\n筛选完成。未找到符合条件的 '底部双倍阳' 信号。")
 
 if __name__ == '__main__':
-    # 检查所需的目录是否存在
     if not os.path.isdir(STOCK_DATA_DIR):
-        print(f"错误: 股票数据目录 '{STOCK_DATA_DIR}' 不存在。请确保已创建该目录并将CSV文件放入其中。")
+        print(f"错误: 股票数据目录 '{STOCK_DATA_DIR}' 不存在。")
     elif not os.path.isfile(STOCK_NAMES_FILE):
         print(f"警告: 股票名称文件 '{STOCK_NAMES_FILE}' 不存在。")
     else:
