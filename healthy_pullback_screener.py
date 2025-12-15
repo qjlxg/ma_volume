@@ -8,14 +8,43 @@ from multiprocessing import Pool, cpu_count
 STOCK_DATA_DIR = 'stock_data'
 STOCK_NAMES_FILE = 'stock_names.csv'
 MIN_CLOSING_PRICE = 5.0
+MAX_CLOSING_PRICE = 20.0  # 新增：收盘价上限
 MAX_PULLBACK_PERCENT = 0.15  # 15%
 MAX_PULLBACK_DAYS = 30
 # --- 配置结束 ---
 
+def check_stock_code_rules(stock_code, stock_name):
+    """
+    检查股票代码和名称是否符合深沪A股、非ST、非创业板等要求。
+    """
+    # 1. 排除ST股票 (通过名称)
+    if 'ST' in stock_name.upper():
+        return False
+
+    # 2. 排除创业板 (30开头)
+    if stock_code.startswith('30'):
+        return False
+
+    # 3. 只保留深沪A股 (通过代码开头)
+    # 沪市A股：60开头 (主板)
+    # 深市A股：00开头 (主板), 002开头 (中小板)
+    if stock_code.startswith('60') or stock_code.startswith('00'):
+        # 排除科创板 (68开头，但已包含在60开头的大类中，为保险起见，严格排除)
+        if stock_code.startswith('68'): 
+             return False
+        return True
+    
+    # 排除所有其他代码，如：
+    # 003, 004 (深市非A股)
+    # 4, 8 (北交所)
+    # 9 (B股)
+    # 7 (可转债/基金等)
+    return False
+
+
 def analyze_stock(file_path):
     """
-    对单个股票的CSV数据进行回调筛选分析。
-    CSV文件格式假设包含 'Date' 和 'Close' 列。
+    对单个股票的CSV数据进行回调筛选分析，并加入新的排除条件。
     """
     try:
         df = pd.read_csv(file_path)
@@ -28,23 +57,25 @@ def analyze_stock(file_path):
         if len(df) < MAX_PULLBACK_DAYS:
             return None
 
-        # 获取股票代码
+        # 获取股票代码 (假设文件名即代码，如 '603693.csv' -> '603693')
         stock_code = os.path.splitext(os.path.basename(file_path))[0]
         
-        # 1. 检查最新收盘价
+        # 2. 预先加载名称并检查股票类型 (Name将在main函数中合并，这里暂时使用一个占位符或假设名称)
+        # 为了在筛选早期排除ST股，我们先进行一个简单的名称检查（如果文件名包含名称信息）
+        # 实际更准确的做法是在main函数中加载所有名称并传递进来，但为了保持函数独立性，这里先跳过名称检查
+        # 假设：如果 stock_names.csv 没有被加载，我们只能通过代码排除ST，但这是不准确的。
+        # 鉴于无法在 analyze_stock 内部可靠获取名称，我们将主要通过代码来排除非A股和创业板。
+        
+        # 3. 检查最新收盘价
         latest_close = df['Close'].iloc[-1]
-        if latest_close < MIN_CLOSING_PRICE:
+        if not (MIN_CLOSING_PRICE <= latest_close <= MAX_CLOSING_PRICE):
             return None
 
-        # 2. 核心回调逻辑
+        # 4. 核心回调逻辑 (与原脚本一致)
         
         # 寻找最近一个高点 (不包括最新收盘价)
-        # 从倒数第二天开始往前找，因为最后一天是潜在的底部或恢复
         for i in range(2, len(df)):
             current_close = df['Close'].iloc[-i]
-            
-            # 如果当前价格高于前一个窗口（比如10天）内的所有价格，可以认为是阶段性高点
-            # 这里简化为寻找全局历史高点，或在过去30天内的高点
             
             # 简化逻辑：从当前日期往前看MAX_PULLBACK_DAYS天的最高价
             recent_high = df['Close'].iloc[max(0, len(df) - i - MAX_PULLBACK_DAYS + 1):len(df) - i + 1].max()
@@ -72,59 +103,63 @@ def analyze_stock(file_path):
                         'Latest_Date': df['Date'].iloc[-1].strftime('%Y-%m-%d')
                     }
                 
-                # 找到一个高点后就退出，只关注最近一次从高点开始的回调
                 break
         
         return None
 
     except Exception as e:
-        print(f"Error processing file {file_path}: {e}")
+        # print(f"Error processing file {file_path}: {e}")
         return None
 
 def main():
-    # 1. 获取所有股票数据文件
-    all_files = glob.glob(os.path.join(STOCK_DATA_DIR, '*.csv'))
-    print(f"Found {len(all_files)} stock data files.")
-
-    if not all_files:
-        print("No stock data files found. Exiting.")
+    # 1. 预加载股票名称用于排除ST和非A股
+    try:
+        names_df = pd.read_csv(STOCK_NAMES_FILE, dtype={'Code': str})
+        names_df['Code'] = names_df['Code'].astype(str)
+        # 确保名称和代码都在同一个DataFrame中，方便后续筛选
+        names_map = names_df.set_index('Code')['Name'].to_dict()
+    except FileNotFoundError:
+        print(f"Error: {STOCK_NAMES_FILE} not found. Cannot proceed with name filtering.")
         return
 
-    # 2. 使用并行处理进行筛选
-    results = []
-    # 使用CPU核心数进行并行
-    with Pool(cpu_count()) as pool:
-        results = pool.map(analyze_stock, all_files)
+    # 2. 筛选符合代码规则的股票列表
+    all_files = glob.glob(os.path.join(STOCK_DATA_DIR, '*.csv'))
+    
+    eligible_files = []
+    print("Pre-filtering stocks based on code and name rules...")
+    for file_path in all_files:
+        stock_code = os.path.splitext(os.path.basename(file_path))[0]
+        stock_name = names_map.get(stock_code, "") # 获取名称，如果找不到则为空字符串
+        
+        # 严格执行规则检查
+        if check_stock_code_rules(stock_code, stock_name):
+            eligible_files.append(file_path)
+            
+    print(f"Total files found: {len(all_files)}. Eligible files for analysis: {len(eligible_files)}.")
 
-    # 过滤掉 None 的结果
+    if not eligible_files:
+        print("No eligible stock data files found after code/name filtering. Exiting.")
+        return
+
+    # 3. 使用并行处理进行回调和价格筛选
+    results = []
+    with Pool(cpu_count()) as pool:
+        results = pool.map(analyze_stock, eligible_files)
+
     screened_stocks = [res for res in results if res is not None]
     
     if not screened_stocks:
-        print("No stocks matched the screening criteria.")
+        print("No stocks matched all screening criteria (price & pullback).")
         return
 
     result_df = pd.DataFrame(screened_stocks)
 
-    # 3. 匹配股票名称
-    try:
-        names_df = pd.read_csv(STOCK_NAMES_FILE, dtype={'Code': str})
-        # 确保 stock_names.csv 中 'Code' 列是字符串类型，且匹配格式
-        names_df['Code'] = names_df['Code'].astype(str)
-        # 假设 stock_names.csv 包含 'Code' 和 'Name' 列
-        
-        final_df = pd.merge(result_df, names_df, on='Code', how='left')
-        final_df['Name'] = final_df['Name'].fillna('名称缺失')
-    except FileNotFoundError:
-        print(f"Warning: {STOCK_NAMES_FILE} not found. Skipping name matching.")
-        final_df = result_df
-        final_df['Name'] = '名称缺失'
+    # 4. 匹配股票名称 (使用预加载的names_df)
+    final_df = pd.merge(result_df, names_df, on='Code', how='left')
+    final_df['Name'] = final_df['Name'].fillna('名称缺失')
     
-    # 调整列顺序
-    final_df = final_df[['Code', 'Name', 'Latest_Date', 'Latest_Close', 'High_Price', 'Pullback_Percent', 'Pullback_Days']]
-
-    # 4. 保存结果
+    # 5. 保存结果
     # 路径格式：/年月/文件名_时间戳.csv
-    # 使用上海时区（北京时间）
     shanghai_now = datetime.now()
     output_dir = shanghai_now.strftime('%Y%m')
     timestamp = shanghai_now.strftime('%Y%m%d_%H%M%S')
@@ -132,6 +167,8 @@ def main():
     os.makedirs(output_dir, exist_ok=True)
     output_filename = os.path.join(output_dir, f'healthy_pullback_results_{timestamp}.csv')
 
+    # 调整列顺序
+    final_df = final_df[['Code', 'Name', 'Latest_Date', 'Latest_Close', 'High_Price', 'Pullback_Percent', 'Pullback_Days']]
     final_df.to_csv(output_filename, index=False, encoding='utf-8')
     print(f"\nSuccessfully screened {len(final_df)} stocks.")
     print(f"Results saved to: {output_filename}")
