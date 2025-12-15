@@ -10,9 +10,27 @@ STOCK_NAMES_FILE = 'stock_names.csv'
 OUTPUT_DIR = 'filtered_results'
 MIN_CLOSE_PRICE = 5.0
 
-# ⚠️ 关键修改点：定义您的CSV文件中实际的列名
-DATE_COLUMN = '交易日期' # <--- 请根据您的实际数据修改此处的日期列名！
-CLOSE_COLUMN = '收盘价' # <--- 请根据您的实际数据修改此处的收盘价列名！
+# ⚠️ 自动匹配关键词列表：脚本将尝试在 CSV 文件头中找到以下任意一个列名
+DATE_KEYWORDS = ['Date', '日期', '交易日期', 'TradeDate', 'TDATE', 'time']
+CLOSE_KEYWORDS = ['Close', '收盘价', 'close', '收盘', 'Adj Close', 'PX_LAST']
+
+
+def find_column_name(df_columns, keywords):
+    """
+    在DataFrame的列名列表中查找与给定关键词匹配的列名。
+    返回第一个匹配到的列名，如果找不到则返回 None。
+    """
+    lower_cols = [col.lower() for col in df_columns]
+    for keyword in keywords:
+        # 尝试完全匹配
+        if keyword in df_columns:
+            return keyword
+        # 尝试忽略大小写匹配
+        if keyword.lower() in lower_cols:
+            # 返回原始大小写的列名
+            return df_columns[lower_cols.index(keyword.lower())]
+    return None
+
 
 def process_single_file(file_path):
     """
@@ -22,44 +40,44 @@ def process_single_file(file_path):
     stock_code = os.path.basename(file_path).split('.')[0]
     
     try:
-        # ⚠️ 修改点：使用配置的列名
-        required_cols = [DATE_COLUMN, CLOSE_COLUMN]
-
-        # 1. 读取数据，只读取需要的列
-        df = pd.read_csv(
-            file_path, 
-            usecols=required_cols,
-        )
+        # 1. 尝试读取整个文件
+        df = pd.read_csv(file_path)
 
         # 2. 确保数据不为空
         if df.empty:
             print(f"警告: 文件 {stock_code}.csv 为空。")
             return None
 
-        # 3. 找到最新的收盘价（DataFrame的最后一行）
-        latest_close = df[CLOSE_COLUMN].iloc[-1]
+        # 3. 自动匹配日期和收盘价列
+        date_col = find_column_name(df.columns, DATE_KEYWORDS)
+        close_col = find_column_name(df.columns, CLOSE_KEYWORDS)
+        
+        if not date_col or not close_col:
+            missing_part = []
+            if not date_col:
+                missing_part.append(f"日期列 (尝试匹配: {', '.join(DATE_KEYWORDS)})")
+            if not close_col:
+                missing_part.append(f"收盘价列 (尝试匹配: {', '.join(CLOSE_KEYWORDS)})")
+                
+            print(f"⚠️ 警告: 文件 {stock_code}.csv 无法自动识别 {', '.join(missing_part)}。")
+            print(f"    该文件的前几列为: {list(df.columns[:5])}。请检查并更新脚本中的关键词列表。")
+            return None
 
-        # 4. 筛选条件：最新收盘价不能低于 5.0 元
+        # 4. 找到最新的收盘价（DataFrame的最后一行）
+        latest_close = df[close_col].iloc[-1]
+
+        # 5. 筛选条件：最新收盘价不能低于 5.0 元
         if latest_close >= MIN_CLOSE_PRICE:
             return stock_code, latest_close
         
         return None
 
-    except KeyError:
-        # 捕获列名缺失错误
-        print(f"致命错误: 文件 {stock_code}.csv 缺少所需列：'{DATE_COLUMN}' 或 '{CLOSE_COLUMN}'。请检查列名配置是否正确。")
-        return None
     except Exception as e:
-        print(f"处理文件 {stock_code}.csv 时发生未预期的错误: {e}")
+        print(f"处理文件 {stock_code}.csv 时发生未预期的错误: {e}") 
         return None
-
-# main 函数保持不变，因为改动只在 process_single_file 内部
 
 def main():
-    # ... (main函数的其余部分保持不变) ...
-    # 为了完整性，我将 main 函数省略，请确保您只修改了顶部的配置和 process_single_file 函数。
-    
-    # ⚠️ 确保您在 process_single_file 函数中使用了新的列名变量。
+    """主函数，执行文件扫描、并行处理和结果保存。"""
     
     # 1. 获取所有股票数据文件路径
     all_files = glob.glob(os.path.join(STOCK_DATA_DIR, '*.csv'))
@@ -83,7 +101,7 @@ def main():
 
     # 3. 将筛选结果转换为 DataFrame
     filtered_df = pd.DataFrame(results, columns=['Code', 'Latest_Close'])
-
+    
     # 4. 读取股票名称匹配文件
     try:
         names_df = pd.read_csv(STOCK_NAMES_FILE, dtype={'Code': str})
