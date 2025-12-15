@@ -1,6 +1,7 @@
 import pandas as pd
 import os
 import glob
+import re # 导入正则表达式库用于ST排除
 from datetime import datetime
 import pytz
 import multiprocessing as mp
@@ -9,6 +10,7 @@ import multiprocessing as mp
 STOCK_DATA_DIR = 'stock_data'
 STOCK_NAMES_FILE = 'stock_names.csv'
 MIN_CLOSE_PRICE = 5.0
+MAX_CLOSE_PRICE = 20.0 # 新增上限过滤
 
 # 设置上海时区
 SH_TZ = pytz.timezone('Asia/Shanghai')
@@ -30,12 +32,7 @@ def is_stacked_multi_cannon(df):
     判断 K 线数据（依赖于重命名后的英文列名：Open, Close, High, Low）是否形成了
     “叠形多方炮”形态。
     
-    形态量化逻辑（关注最近 4 个交易日 K1, K2, K3, K4）：
-    1. K2, K3 必须是阳线 (Close > Open)。
-    2. K4 必须是突破大阳线 (Close > Open)。
-    3. K2, K3 实体相对较小（小于 K4 实体的一半），形成整理。
-    4. K4 的收盘价必须突破 K1, K2, K3 的最高价。
-    5. K4 的收盘价必须 >= MIN_CLOSE_PRICE (5.0元)。
+    （形态量化逻辑保持不变）
     """
     if len(df) < 4:
         return False
@@ -78,8 +75,9 @@ def is_stacked_multi_cannon(df):
     if C[3] <= max_prev_high:
         return False
         
-    # 5. K4 的最新收盘价过滤
-    if C[3] < MIN_CLOSE_PRICE:
+    # 5. K4 的最新收盘价过滤 (新增上限)
+    latest_close = C[3]
+    if not (MIN_CLOSE_PRICE <= latest_close <= MAX_CLOSE_PRICE):
         return False
 
     return True
@@ -88,29 +86,33 @@ def is_stacked_multi_cannon(df):
 def process_single_file(file_path):
     """处理单个股票数据文件，检查形态并返回代码（如果符合）"""
     stock_code = os.path.basename(file_path).split('.')[0]
+    
+    # 排除 30 开头的股票代码 (创业板)
+    if stock_code.startswith('30'):
+        return None
+        
+    # 排除非深沪A股（主要保留 60/00 开头），但由于数据文件是从 stock_data 读取的，
+    # 且已排除 30 开头，这里仅需确保代码是 6位数字即可。
+    # 假设您的数据目录只包含股票数据文件。
+
     try:
         df = pd.read_csv(file_path)
         
         # 1. 重命名列以适应脚本逻辑
         df = df.rename(columns=COLUMN_MAPPING)
         
-        # 2. 检查关键列是否已成功重命名并存在
         required_cols = ['Date', 'Open', 'Close', 'High', 'Low']
         if not all(col in df.columns for col in required_cols):
-             # 检查是否因为原始文件缺失列
-            missing_cols_cn = [col_cn for col_cn, col_en in COLUMN_MAPPING.items() if col_en in required_cols and col_cn not in df.columns]
-            if missing_cols_cn:
-                # print(f"❌ 文件 {file_path} 缺少原始列: {', '.join(missing_cols_cn)}")
-                pass # 减少日志输出，只报告最终结果
             return None
         
-        # 3. 解析日期并清理 NaN
+        # 2. 解析日期并清理 NaN
         df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
-        df = df.dropna(subset=['Date', 'Open', 'Close', 'High', 'Low']) # 移除无效数据行
+        df = df.dropna(subset=['Date', 'Open', 'Close', 'High', 'Low'])
 
-        # 4. 确保数据按日期排序
+        # 3. 确保数据按日期排序
         df = df.sort_values(by='Date').reset_index(drop=True)
-
+        
+        # 4. 执行形态检查和收盘价过滤
         if is_stacked_multi_cannon(df):
             return stock_code
         
@@ -118,6 +120,26 @@ def process_single_file(file_path):
         print(f"❌ 处理文件 {file_path} 出错: {e}")
         
     return None
+
+def filter_st(results_df, names_df):
+    """排除名称中含有 *ST 或 ST 的股票"""
+    
+    # 将名称映射到结果 DataFrame
+    name_map = names_df.set_index('code')['name'].to_dict()
+    results_df['股票名称'] = results_df['股票代码'].map(name_map)
+    
+    # 使用正则表达式过滤名称中包含 *ST 或 ST 的股票
+    # re.IGNORECASE 忽略大小写
+    st_mask = results_df['股票名称'].apply(lambda x: bool(re.search(r'\*?ST', str(x), re.IGNORECASE)))
+    
+    filtered_df = results_df[~st_mask]
+    
+    # 统计排除数量并输出
+    excluded_count = len(results_df) - len(filtered_df)
+    if excluded_count > 0:
+        print(f"已根据名称过滤条件排除 {excluded_count} 只 ST/退市风险股票。")
+        
+    return filtered_df
 
 def main():
     print(f"--- 股票形态扫描器启动 ({datetime.now(SH_TZ).strftime('%Y-%m-%d %H:%M:%S')}) ---")
@@ -128,57 +150,56 @@ def main():
         print(f"未在 '{STOCK_DATA_DIR}' 目录下找到任何 CSV 文件。请确保数据已上传。")
         return
 
-    # 2. 并行处理所有文件
+    # 2. 并行处理所有文件 (包含 30 开头的代码排除)
     print(f"开始扫描 {len(all_files)} 个股票文件...")
-    # 使用所有可用的 CPU 核心进行并行处理
     pool = mp.Pool(mp.cpu_count())
     found_codes = pool.map(process_single_file, all_files)
     pool.close()
     pool.join()
     
-    # 过滤掉 None 值
     found_codes = [code for code in found_codes if code is not None]
     
     if not found_codes:
-        print("未找到符合 '叠形多方炮' 形态的股票。")
+        print("未找到符合 '叠形多方炮' 形态且符合价格/板块过滤条件的股票。")
         return
 
-    # 3. 匹配股票名称
-    print(f"共发现 {len(found_codes)} 只符合形态的股票，开始匹配名称...")
+    # 3. 匹配股票名称并执行 ST 排除 (需要先加载 names_df)
+    print(f"初筛得到 {len(found_codes)} 只股票，开始匹配名称并执行 ST 过滤...")
     try:
-        # 假设 stock_names.csv 格式为 'code', 'name'
         names_df = pd.read_csv(STOCK_NAMES_FILE, dtype={'code': str})
-        names_df = names_df.set_index('code')['name'].to_dict()
     except Exception as e:
-        print(f"读取或处理 '{STOCK_NAMES_FILE}' 文件失败: {e}。将只输出代码。")
-        names_df = {}
-        
-    # 4. 组织结果
-    results = []
-    for code in found_codes:
-        name = names_df.get(code, '名称未找到')
-        results.append({'股票代码': code, '股票名称': name})
-        
-    results_df = pd.DataFrame(results)
+        print(f"读取 '{STOCK_NAMES_FILE}' 失败: {e}。无法进行 ST 过滤。")
+        names_df = pd.DataFrame({'code': [], 'name': []})
+
+    # 组织结果 DataFrame (用于 ST 过滤)
+    results_df_raw = pd.DataFrame({'股票代码': found_codes})
+    
+    # 4. 执行 ST 过滤
+    results_df = filter_st(results_df_raw, names_df)
+    
+    if results_df.empty:
+        print("经过 ST 过滤后，没有股票符合条件。")
+        return
+    
+    print(f"最终筛选得到 {len(results_df)} 只符合条件的股票。")
 
     # 5. 保存结果
     now = datetime.now(SH_TZ)
     timestamp_str = now.strftime('%Y%m%d_%H%M%S')
     year_month_dir = now.strftime('%Y/%m')
     
-    # 创建输出目录
     output_dir = os.path.join('scan_results', year_month_dir)
     os.makedirs(output_dir, exist_ok=True)
     
-    # 结果文件名
     output_filename = f'stacked_multi_cannon_{timestamp_str}.csv'
     output_path = os.path.join(output_dir, output_filename)
     
-    results_df.to_csv(output_path, index=False, encoding='utf-8')
+    # 确保 '股票代码' 和 '股票名称' 列的顺序
+    final_cols = ['股票代码', '股票名称']
+    results_df[final_cols].to_csv(output_path, index=False, encoding='utf-8')
     print(f"\n🎉 筛选结果已成功保存到: {output_path}")
 
 if __name__ == "__main__":
-    # 使用 try-except 捕获主程序异常，确保日志友好
     try:
         main()
     except Exception as e:
