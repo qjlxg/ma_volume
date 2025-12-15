@@ -2,20 +2,24 @@ import os
 import pandas as pd
 from datetime import datetime
 from multiprocessing import Pool, cpu_count
+import pytz
 
-# --- 配置 ---
+# --- 配置常量 ---
 STOCK_DATA_DIR = 'stock_data'
 STOCK_NAMES_FILE = 'stock_names.csv'
-MIN_CLOSE_PRICE = 5.0
-MAX_CLOSE_PRICE = 20.0 # 新增：最高收盘价限制
-ALIGNMENT_TOLERANCE = 0.01
+MIN_CLOSE_PRICE = 5.0  # 股价下限
+MAX_CLOSE_PRICE = 20.0 # 股价上限
+# K线最高点和最低点对齐的容忍度 (例如: 0.01 = 1%)
+ALIGNMENT_TOLERANCE = 0.01 
+SHANGHAI_TZ = pytz.timezone('Asia/Shanghai')
 
 def load_stock_names(file_path):
     """加载股票代码和名称的映射表"""
     try:
         # 假设 stock_names.csv 包含 'code' 和 'name' 两列
-        names_df = pd.read_csv(file_path, dtype={'code': str})
-        return dict(zip(names_df['code'], names_df['name']))
+        names_df = pd.read_csv(file_path, dtype={'Code': str, 'Name': str})
+        # 确保列名与文件内容一致
+        return dict(zip(names_df['Code'], names_df['Name']))
     except FileNotFoundError:
         print(f"警告: 找不到股票名称文件 {file_path}")
         return {}
@@ -25,33 +29,25 @@ def load_stock_names(file_path):
 
 def is_valid_stock(code, name):
     """
-    检查股票代码和名称是否符合深沪A股和排除条件。
+    检查股票代码和名称是否符合深沪A股的排除条件。
+    排除 ST/*ST，排除 30 开头 (创业板)，保留 00/60 开头的主流 A 股。
     """
-    # 1. 排除 ST/ *ST
+    # 1. 排除 ST / *ST
     if 'ST' in name.upper() or '*' in name:
         return False
         
-    # 2. 排除创业板 (30开头)
-    if code.startswith('30'):
-        return False
-
-    # 3. 仅保留深沪A股 (60, 00开头的股票，排除30，通常排除20, 90等B股/指数/其他)
-    # 简化判断：只要不是 30 开头，且是 6位数字即可，因为数据源通常只包含A股。
-    # 更严格的A股判断：
-    # 沪市A股: 600xxx, 601xxx, 603xxx, 688xxx (科创板，但可能要保留)
-    # 深市A股: 000xxx, 001xxx, 002xxx, 003xxx
-    
-    # 排除科创板 (688) 和 B股/指数/其他 (20, 90, 8x, 5x, 1x等)
-    if code.startswith(('60', '00')):
+    # 2. 排除创业板 (30开头) 和其他非主流 A 股
+    # 深市 A 股: 000xxx, 001xxx, 002xxx, 003xxx
+    # 沪市 A 股: 600xxx, 601xxx, 603xxx
+    if code.startswith(('00', '60')):
         return True
     
-    # 由于您明确排除了 30 (创业板)，我们默认只保留 60 和 00，除非数据源包含其他A股代码。
-    # 稳妥起见，保留上述判断，确保只选取主流A股。
+    # 排除所有其他代码，包括 30(创业板), 688(科创板), 20/90(B股/其他)
     return False
 
 def check_tombstone_submerged_bottom(df, stock_code, stock_name):
     """
-    在 K 线形态检查前，先进行最新的股价和类型检查。
+    检查 '巨石沉底' 形态 (T, T-1, T-2 三日数据) 和所有筛选条件。
     """
     # 0. 检查是否为有效股票（代码和名称）
     if not is_valid_stock(stock_code, stock_name):
@@ -60,6 +56,7 @@ def check_tombstone_submerged_bottom(df, stock_code, stock_name):
     if len(df) < 3:
         return False
 
+    # 选取最近三天的 K 线数据 (确保 df 是按日期降序排列的)
     T_2 = df.iloc[2]
     T_1 = df.iloc[1]
     T = df.iloc[0]
@@ -68,69 +65,78 @@ def check_tombstone_submerged_bottom(df, stock_code, stock_name):
     if not (MIN_CLOSE_PRICE <= T['Close'] <= MAX_CLOSE_PRICE):
         return False
 
-    # 2. K 线实体方向要求 (保持不变)
-    is_T_2_bearish = T_2['Close'] < T_2['Open']
-    is_T_1_bullish = T_1['Close'] > T_1['Open']
-    is_T_bearish   = T['Close'] < T['Open']
+    # 2. K 线实体方向要求
+    is_T_2_bearish = T_2['Close'] < T_2['Open'] # T-2 阴线
+    is_T_1_bullish = T_1['Close'] > T_1['Open'] # T-1 阳线
+    is_T_bearish   = T['Close'] < T['Open']     # T 阴线
 
     if not (is_T_2_bearish and is_T_1_bullish and is_T_bearish):
         return False
 
-    # 3. 实体大小要求 (保持不变)
+    # 3. 实体大小要求 (T-1 实体相对较小)
     T_1_body_size = abs(T_1['Close'] - T_1['Open'])
     T_2_body_size = abs(T_2['Close'] - T_2['Open'])
     T_body_size = abs(T['Close'] - T['Open'])
     
-    if T_1_body_size * 2 > T_2_body_size or T_1_body_size * 2 > T_body_size:
+    # 要求 T-1 实体大小不超过 T-2 和 T 实体大小的 50% (定性判断)
+    if T_1_body_size > T_2_body_size * 0.5 or T_1_body_size > T_body_size * 0.5:
         return False
 
-    # 4. 高低点对齐要求 (保持不变)
+    # 4. 高低点对齐要求 (巨石沉底的核心)
     min_low = min(T['Low'], T_1['Low'], T_2['Low'])
     max_low = max(T['Low'], T_1['Low'], T_2['Low'])
     min_high = min(T['High'], T_1['High'], T_2['High'])
     max_high = max(T['High'], T_1['High'], T_2['High'])
     
-    # 容忍度计算
     avg_low = (T['Low'] + T_1['Low'] + T_2['Low']) / 3
     avg_high = (T['High'] + T_1['High'] + T_2['High']) / 3
 
-    # 避免除以零
-    if avg_low == 0 or avg_high == 0:
+    # 避免除以零和处理极端情况
+    if avg_low < 0.1 or avg_high < 0.1: 
         return False
 
+    # 容忍度计算：(最大值 - 最小值) / 平均值 <= ALIGNMENT_TOLERANCE
     low_aligned = (max_low - min_low) / avg_low <= ALIGNMENT_TOLERANCE
-    high_aligned = (max_high - min_high) / avg_high <= ALignment_TOLERANCE
+    high_aligned = (max_high - min_high) / avg_high <= ALIGNMENT_TOLERANCE
 
     return low_aligned and high_aligned
 
-def process_file(file_path, stock_names):
-    """单个文件的处理逻辑，需要传入股票名称字典"""
+def process_file(file_path_tuple):
+    """单个文件的处理逻辑，使用元组传入文件路径和名称字典"""
+    file_path, stock_names = file_path_tuple
     stock_code = os.path.splitext(os.path.basename(file_path))[0]
     stock_name = stock_names.get(stock_code, '未知名称')
     
-    # 预先筛选：如果代码或名称不符合基本条件，则不加载数据
+    # 预先筛选：如果代码或名称不符合基本条件，则不加载数据 (减少IO操作)
     if not is_valid_stock(stock_code, stock_name):
         return None
 
     try:
+        # 假设 CSV 包含 Date, Open, High, Low, Close, Volume 等列
         df = pd.read_csv(
             file_path,
             parse_dates=['Date'],
-            index_col='Date',
+            # 确保列名与数据中的一致，如果文件名没有index，index_col=None
             dtype={'Open': float, 'High': float, 'Low': float, 'Close': float}
         )
         
-        df = df.sort_values(by='Date', ascending=False)
+        # 确保日期列存在并进行排序
+        if 'Date' not in df.columns:
+            raise ValueError("CSV文件缺少 'Date' 列。")
+
+        df = df.sort_values(by='Date', ascending=False).reset_index(drop=True)
         
         # 传入 stock_code 和 stock_name 进行检查
         if check_tombstone_submerged_bottom(df, stock_code, stock_name):
-            latest_date = df.iloc[0].name.strftime('%Y-%m-%d')
+            # 获取最新的日期作为筛选日期
+            latest_date = df.iloc[0]['Date'].strftime('%Y-%m-%d')
             latest_close = df.iloc[0]['Close']
             return stock_code, latest_date, latest_close
         
     except Exception as e:
-        # 排除那些因为数据格式不正确而导致的错误文件
-        print(f"处理文件 {stock_code}.csv 时出错: {e}")
+        # 仅在调试时打印错误，避免并行输出混乱
+        # print(f"处理文件 {stock_code}.csv 时出错: {e}") 
+        pass
     
     return None
 
@@ -148,24 +154,24 @@ def main():
         print("未找到任何 CSV 数据文件，程序退出。")
         return
 
-    # 2. 加载股票名称 (并行处理前加载一次)
+    # 2. 加载股票名称 (在主线程加载一次)
     stock_names = load_stock_names(STOCK_NAMES_FILE)
     
-    # 3. 并行处理文件
-    print(f"开始扫描 {len(data_files)} 个文件，使用 {cpu_count()} 核心进行并行处理...")
-    
-    # 为 Pool.map 准备参数列表 (文件路径 + 名称字典)
-    # 由于 Pool.map 只能接受单个迭代器参数，我们使用 lambda/partial 或 tuple 传递，
-    # 但在 Pool 的场景下，最好是**修改 process_file 接收两个参数**并在 Pool 外包装。
-    # 为了简化，我们使用一个包装函数传递 stock_names
-    
-    def process_wrapper(file_path):
-        return process_file(file_path, stock_names)
+    if not stock_names:
+        print("股票名称对照表为空或加载失败，无法进行名称匹配，程序退出。")
+        return
+        
+    # 3. 准备并行处理的参数列表 [(文件路径, 名称字典), ...]
+    file_list_with_names = [(f, stock_names) for f in data_files]
 
-    with Pool(cpu_count()) as pool:
-        results = pool.map(process_wrapper, data_files)
+    # 4. 并行处理文件
+    num_cores = cpu_count()
+    print(f"开始扫描 {len(data_files)} 个文件，使用 {num_cores} 核心进行并行处理...")
+    
+    with Pool(num_cores) as pool:
+        results = pool.map(process_file, file_list_with_names)
 
-    # 4. 收集并整理结果
+    # 5. 收集并整理结果
     filtered_stocks = [res for res in results if res is not None]
 
     if not filtered_stocks:
@@ -183,14 +189,15 @@ def main():
     # 重新排序输出列
     results_df = results_df[['Code', 'Name', 'Latest_Close', 'Date']]
     
-    # 5. 保存结果到指定路径
-    current_time_utc = datetime.utcnow()
-    # 转换为上海时区 (UTC+8)
-    shanghai_tz = pd.to_datetime(current_time_utc).tz_localize('UTC').tz_convert('Asia/Shanghai')
+    # 6. 保存结果到指定路径
+    current_time_utc = datetime.utcnow().replace(tzinfo=pytz.utc)
+    # 转换为上海时区
+    shanghai_tz_dt = current_time_utc.astimezone(SHANGHAI_TZ)
     
-    year_month_dir = shanghai_tz.strftime('%Y%m')
-    timestamp_str = shanghai_tz.strftime('%Y%m%d%H%M%S')
+    year_month_dir = shanghai_tz_dt.strftime('%Y%m')
+    timestamp_str = shanghai_tz_dt.strftime('%Y%m%d%H%M%S')
     
+    # 输出目录和文件名都在根目录下
     output_dir = os.path.join(year_month_dir)
     os.makedirs(output_dir, exist_ok=True)
     
@@ -206,6 +213,6 @@ def main():
 
 if __name__ == '__main__':
     if not os.path.isdir(STOCK_DATA_DIR):
-        print(f"错误: 找不到数据目录 '{STOCK_DATA_DIR}'，请检查工作流配置。")
+        print(f"错误: 找不到数据目录 '{STOCK_DATA_DIR}'，请检查工作流配置和文件结构。")
     else:
         main()
