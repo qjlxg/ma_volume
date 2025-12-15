@@ -1,4 +1,5 @@
-name: 📈 Stock Screener
+name: Stock Screener
+
 on:
   # 1. 定时触发：每天 18:00 (北京时间) / 10:00 (UTC)
   schedule:
@@ -30,7 +31,6 @@ jobs:
   filter_and_commit:
     runs-on: ubuntu-latest
     
-    # 设置工作环境的时区为上海时区
     env:
       TZ: Asia/Shanghai
 
@@ -38,7 +38,6 @@ jobs:
       - name: ⬇️ Checkout Repository (Fetch History)
         uses: actions/checkout@v4
         with:
-          # 必须拉取历史记录以便推送结果
           fetch-depth: 0
 
       - name: ⚙️ Setup Python Environment
@@ -57,31 +56,23 @@ jobs:
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
           
-      # 🚀 Commit and Push Results 步骤拆分，更稳定地检测变化
-      - name: 🔍 Check for New Results
-        id: check
+      - name: 🚀 Commit and Push Results (修复Git检测)
         run: |
-          # 检查 results/ 目录与 HEAD 之间是否存在差异 (即是否有新文件或修改)
-          # 使用 git diff --exit-code 更可靠地检测变化
-          if git diff --exit-code --quiet HEAD -- results/; then
-            echo "::set-output name=changes::false"
-          else
-            echo "::set-output name=changes::true"
-          fi
-
-      - name: 📝 Commit New Results
-        if: steps.check.outputs.changes == 'true'
-        run: |
+          # 1. 强制追踪 results/ 目录下的所有文件 (包括新建的)
           git add results/
           
-          # 设置提交时间变量
-          COMMIT_TIME=$(date '+%Y-%m-%d %H:%M:%S %Z')
-          
-          # 提交并推送
-          git commit -m "📈 Auto-Screen: Results pushed at ${COMMIT_TIME} (Shanghai)"
-          git push
-          echo "Results pushed successfully."
-          
-      - name: ℹ️ No Changes Detected
-        if: steps.check.outputs.changes == 'false'
-        run: echo "No changes in results directory. Nothing to commit."
+          # 2. 使用 git status --porcelain 检查是否有文件在暂存区等待提交
+          # 如果有输出，说明 git add results/ 成功添加了新文件或修改过的文件
+          if git status --porcelain | grep 'results/'; then
+            echo "New results found, commencing commit..."
+            
+            # 使用上海时区的时间作为 commit 信息
+            COMMIT_TIME=$(date '+%Y-%m-%d %H:%M:%S %Z')
+            
+            # 提交并推送
+            git commit -m "📈 Auto-Screen: Results pushed at ${COMMIT_TIME} (Shanghai)"
+            git push
+            echo "Results pushed successfully."
+          else
+            echo "No new changes or modifications in results directory after screening. Nothing to commit."
+          fi
