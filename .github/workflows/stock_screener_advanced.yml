@@ -11,7 +11,7 @@ on:
 
   schedule:
     # UTC 时间 10:00，对应北京时间 (UTC+8) 18:00
-    - cron: '0 18 * * *' 
+    - cron: '0 15 * * *' 
   
   push:
     branches:
@@ -30,14 +30,14 @@ jobs:
 
     env:
       TZ: 'Asia/Shanghai' 
-      # 💥 修正1: 明确定义 TZ_OFFSET，确保它不会丢失
-      TZ_OFFSET: '+0800' 
+      TZ_OFFSET: '+0800' # UTC+8 offset
 
     steps:
-    - name: ⬇️ Checkout Repository
+    - name: ⬇️ Checkout Repository (Full History)
       uses: actions/checkout@v4
       with:
-        fetch-depth: 0 # 拉取所有历史记录，以便处理冲突
+        # 拉取完整的历史记录，为 rebase/push 做准备
+        fetch-depth: 0 
 
     - name: 🐍 Set up Python
       uses: actions/setup-python@v5
@@ -52,31 +52,29 @@ jobs:
     - name: 🏃 Run Stock Screener Script
       run: python stock_screener_advanced.py
 
-    - name: 💾 Commit and Push Results
+    - name: 💾 Commit Results Locally (Skip Push)
+      # 💥 修正1：仅创建本地 commit，不进行推送
       uses: stefanzweifel/git-auto-commit-action@v5
       with:
         commit_message: "Automated: Add new stock screening results"
         file_pattern: output/**/*.csv 
-        # 💥 修正2: 确保使用 env.TZ_OFFSET
         commit_options: '--date="${{ env.TZ_OFFSET }}"' 
+        # 核心修正：跳过推送，避免 non-fast-forward 错误
+        skip_push: true 
 
-    - name: 🚨 
-      # 仅在上一步失败时执行 (通常是由于远程分支更新导致推送被拒绝)
-      if: failure()
+    - name: ⬆️ Final Push with Conflict Resolution
+      # 💥 修正2：使用自定义命令手动处理拉取和推送
       run: |
-        echo "Auto-commit failed due to Git conflict. Initiating fallback push."
+        echo "Pushing commit with conflict resolution..."
         
-        # 1. 强制将生成的新文件添加到暂存区
-        # 💥 修正3: 解决 'Your index contains uncommitted changes' 错误
-        git add output/**/*.csv 
-
-        # 2. 配置 Git 身份 (若 Action 失败可能丢失)
+        # 1. 确保 Git 身份设置
         git config user.name "github-actions[bot]"
         git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
         
-        # 3. 拉取远程更改，并将我们的 commit 放在最上面
+        # 2. 拉取远程更改并 Rebase (将我们的新 commit 放在顶部)
+        # Rebase 是解决冲突的最佳方法，因为它会创建一个干净的线性历史
         git pull --rebase
         
-        # 4. 强制推送 (因为我们已经解决了冲突)
-        git push -f
-        echo "Fallback push successful."
+        # 3. 推送结果。由于已经 rebase，推送将成功
+        git push
+        echo "Final push successful."
