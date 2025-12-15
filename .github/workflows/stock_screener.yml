@@ -1,18 +1,17 @@
-name: 📈 Stock Screener: Low Cost Christmas Pattern
-# 触发条件
+name: 📈 Stock Screener
 on:
   # 1. 定时触发：每天 18:00 (北京时间) / 10:00 (UTC)
-  # BJT (UTC+8) 18:00 = UTC 10:00
   schedule:
-    - cron: '0 10 * * *'
- 
+    - cron: '0 10 * * *' 
+  
   # 2. 手动触发
   workflow_dispatch:
     inputs:
       reason:
-        description: 'Manual run reason (Shanghai Time Zone Check)'
+        description: 'Manual run trigger'
         required: false
-        default: 'Manual trigger for immediate screening'
+        default: 'Manual screening execution'
+
   # 3. 脚本或工作流变动时自动运行
   push:
     branches:
@@ -26,54 +25,63 @@ on:
     paths:
       - 'filter_stocks.py'
       - '.github/workflows/stock_screener.yml'
+
 jobs:
   filter_and_commit:
     runs-on: ubuntu-latest
-   
-    # 设置工作环境的时区为上海时区 (Asia/Shanghai)，确保 Python 脚本和 Shell 命令的时间戳正确
+    
+    # 设置工作环境的时区为上海时区
     env:
       TZ: Asia/Shanghai
+
     steps:
       - name: ⬇️ Checkout Repository (Fetch History)
         uses: actions/checkout@v4
         with:
           # 必须拉取历史记录以便推送结果
           fetch-depth: 0
+
       - name: ⚙️ Setup Python Environment
         uses: actions/setup-python@v5
         with:
           python-version: '3.x'
+
       - name: 📦 Install Python Dependencies
-        run: |
-          # 安装 pandas 和 pytz 库
-          python -m pip install --upgrade pip
-          pip install pandas pytz
+        run: pip install pandas pytz
+
       - name: 🏃 Run Stock Filter Script
-        # 运行 Python 脚本，并自动创建 results/年-月/ 文件
         run: python filter_stocks.py
-       
-      - name: 💾 Configure Git for Commit
+        
+      - name: 💾 Configure Git
         run: |
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-      - name: 🚀 Commit and Push Results
-        # 检查是否有新的筛选结果文件生成并提交
+          
+      # 🚀 Commit and Push Results 步骤拆分，更稳定地检测变化
+      - name: 🔍 Check for New Results
+        id: check
         run: |
-          # 检查 results/ 目录下是否有文件需要被 git 追踪
-          if git status --porcelain | grep 'results/'; then
-            echo "New results found, staging files..."
-            git add results/
-           
-            # 修正：将 COMMIT_TIME 的计算和变量传递放在一起
-            # 确保 date 命令在 TZ 环境变量下执行
-            COMMIT_TIME=$(date '+%Y-%m-%d %H:%M:%S %Z')
-           
-            # 使用 Shell 变量进行提交
-            git commit -m "📈 Auto-Screen: Results pushed at ${COMMIT_TIME} (Shanghai)"
-           
-            echo "Committing and pushing results..."
-            git push
-            echo "Results pushed successfully."
+          # 检查 results/ 目录与 HEAD 之间是否存在差异 (即是否有新文件或修改)
+          # 使用 git diff --exit-code 更可靠地检测变化
+          if git diff --exit-code --quiet HEAD -- results/; then
+            echo "::set-output name=changes::false"
           else
-            echo "No changes in results directory. Nothing to commit."
+            echo "::set-output name=changes::true"
           fi
+
+      - name: 📝 Commit New Results
+        if: steps.check.outputs.changes == 'true'
+        run: |
+          git add results/
+          
+          # 设置提交时间变量
+          COMMIT_TIME=$(date '+%Y-%m-%d %H:%M:%S %Z')
+          
+          # 提交并推送
+          git commit -m "📈 Auto-Screen: Results pushed at ${COMMIT_TIME} (Shanghai)"
+          git push
+          echo "Results pushed successfully."
+          
+      - name: ℹ️ No Changes Detected
+        if: steps.check.outputs.changes == 'false'
+        run: echo "No changes in results directory. Nothing to commit."
