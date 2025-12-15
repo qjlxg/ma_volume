@@ -1,4 +1,4 @@
-# 文件名: bottom_double_bullish_scanner.py
+# 文件名: bottom_double_bullish_scanner.py - 修正版本
 
 import pandas as pd
 import glob
@@ -12,15 +12,31 @@ STOCK_NAMES_FILE = 'stock_names.csv'
 OUTPUT_BASE_DIR = '.'
 MIN_CLOSE_PRICE = 5.0
 
+# 定义您的CSV文件中的中文列名映射到脚本中使用的英文名称
+COLUMN_MAP = {
+    '日期': 'Date',
+    '开盘': 'Open',
+    '收盘': 'Close',
+    '最高': 'High',
+    '最低': 'Low',
+    '成交量': 'Volume',
+    '成交额': 'Amount', # 虽然Amount（成交额）未使用，但读取时包含
+}
+
 # ------------------------------------
 
 def load_stock_names(filepath):
     """加载股票代码和名称的映射"""
     try:
-        # 假设 stock_names.csv 包含 'code' 和 'name' 列
-        names_df = pd.read_csv(filepath, dtype={'code': str})
+        # 使用 utf-8-sig (BOM) 编码读取，以兼容 Excel 保存的中文 CSV 文件
+        names_df = pd.read_csv(filepath, encoding='utf-8-sig', dtype={'code': str})
+        
+        # 确保列名是 code 和 name
+        if 'code' not in names_df.columns or 'name' not in names_df.columns:
+             print("错误: stock_names.csv 必须包含 'code' 和 'name' 两列。")
+             return {}
+
         names_df['code'] = names_df['code'].astype(str)
-        # 确保代码格式为6位字符串，如果文件中的代码是数字需要转换
         names_map = names_df.set_index('code')['name'].to_dict()
         return names_map
     except Exception as e:
@@ -35,12 +51,13 @@ def check_bottom_double_bullish(df: pd.DataFrame, stock_code: str, names_map: di
     :param names_map: 股票代码-名称映射
     :return: 满足条件的信号列表 (Code, Name, Date)
     """
-    if df.empty or len(df) < 20:
-        return []
-
     # 确保数据按日期升序排列
     df = df.sort_values(by='Date').reset_index(drop=True)
     
+    # 至少需要 20 个交易日来计算均值和趋势
+    if df.empty or len(df) < 20:
+        return []
+
     # 过滤最新收盘价低于 MIN_CLOSE_PRICE 的股票
     if df['Close'].iloc[-1] < MIN_CLOSE_PRICE:
         return []
@@ -81,9 +98,13 @@ def check_bottom_double_bullish(df: pd.DataFrame, stock_code: str, names_map: di
     
     # 6. 综合所有条件
     # C1 必须发生，且 T-1 日的震荡/回调条件满足，且 C2 发生
-    signal_mask = df['Is_Downtrend'] & df['Is_C1'] & df['Consolidation_OK'] & df['Is_C2']
+    # 仅检查最后一行数据是否满足信号
+    signal_mask = df.index == df.index[-1] # 只关注最后一行数据
     
-    # 找到最新一个满足条件的日期 (由于我们只看最后一条数据，所以只取最后一行)
+    # 确保前一个条件成立 (Is_Downtrend 是 T-20 日与 T 日比较，适用于最新数据)
+    signal_mask &= df['Is_Downtrend'] & df['Is_C1'] & df['Consolidation_OK'] & df['Is_C2']
+
+    # 找到最新一个满足条件的日期
     latest_signal = df[signal_mask].iloc[-1] if signal_mask.any() else None
 
     results = []
@@ -126,8 +147,6 @@ def main():
     
     all_results = []
     
-    # 由于 I/O 密集型操作在 GitHub Actions 中并行化效果不一定更好，
-    # 且为了简化，这里使用顺序处理，但利用 pandas 内部的矢量化提高处理效率。
     print(f"找到 {len(csv_files)} 个股票数据文件，开始扫描...")
 
     for i, file_path in enumerate(csv_files):
@@ -135,25 +154,33 @@ def main():
         stock_code = os.path.basename(file_path).split('.')[0]
         
         try:
-            # 读取数据
-            df = pd.read_csv(file_path, parse_dates=['Date'])
+            # === 核心修改点 1: 读取数据时指定列名和日期解析 ===
+            # 使用 utf-8-sig (BOM) 编码读取，以兼容 Excel 保存的中文 CSV 文件
+            df = pd.read_csv(file_path, encoding='utf-8-sig', parse_dates=['日期'])
+            
+            # === 核心修改点 2: 重命名列名，便于后续代码处理 ===
+            df = df.rename(columns=COLUMN_MAP)
+            
+            # 仅保留需要的列
+            df = df[['Date', 'Open', 'Close', 'High', 'Low', 'Volume']].dropna()
             
             # 运行分析
             results = check_bottom_double_bullish(df, stock_code, names_map)
             all_results.extend(results)
             
         except Exception as e:
+            # 打印导致错误的列名映射，帮助用户排查
             print(f"处理文件 {file_path} 时发生错误: {e}")
             
     # 5. 保存结果
     if all_results:
         results_df = pd.DataFrame(all_results)
         results_df = results_df[['代码', '名称', '信号日期', '最新收盘价']] # 调整列顺序
+        # 使用 utf-8-sig 编码保存，确保中文在 Windows/Excel 中显示正常
         results_df.to_csv(output_filepath, index=False, encoding='utf-8-sig')
         print(f"\n筛选完成。找到 {len(all_results)} 个信号，结果已保存至: {output_filepath}")
     else:
         print("\n筛选完成。未找到符合条件的 '底部双倍阳' 信号。")
-        # 如果没有结果，创建一个空文件，或者不创建。这里选择不创建，但返回信息给用户。
 
 if __name__ == '__main__':
     # 检查所需的目录是否存在
