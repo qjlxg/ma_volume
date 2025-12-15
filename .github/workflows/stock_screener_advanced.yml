@@ -1,0 +1,66 @@
+name: Stock Screener Advanced Workflow
+
+# 触发器配置
+on:
+  # 1. 手动触发
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: 'Manual run reason (e.g., Debugging, Emergency)'
+        required: false
+        default: 'Manual Trigger'
+
+  # 2. 每天定时运行 (北京时间 18:00)
+  schedule:
+    # 每天 10:00 UTC 运行，对应北京时间 (UTC+8) 18:00
+    - cron: '0 15 * * *' 
+  
+  # 3. 脚本和工作流文件变动时自动运行
+  push:
+    branches:
+      - main  # 假设你的主分支是 main
+    paths:
+      - 'stock_screener_advanced.py'
+      - '.github/workflows/stock_screener_advanced.yml'
+      # 如果 stock_data 或 stock_names.csv 变动也需要运行，请取消注释以下行
+      # - 'stock_data/**'
+      # - 'stock_names.csv'
+
+
+jobs:
+  run_screener:
+    runs-on: ubuntu-latest
+    
+    # 设置时区为上海 (北京时间)
+    env:
+      TZ: 'Asia/Shanghai' 
+
+    steps:
+    - name: ⬇️ Checkout Repository
+      uses: actions/checkout@v4
+      # 确保 stock_data 目录及其内容已推送到你的GitHub仓库。
+
+    - name: 🐍 Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+
+    - name: 📦 Install Dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install pandas
+
+    - name: 🏃 Run Stock Screener Script
+      run: python stock_screener_advanced.py
+
+    - name: 💾 Commit and Push Results (Excluding Artifacts)
+      # 查找新生成的 output 目录，并将其推送到仓库
+      uses: stefanzweifel/git-auto-commit-action@v5
+      with:
+        commit_message: "Automated: Add new stock screening results"
+        # 只提交 output 目录下的文件
+        files: output/*.csv output/*/*.csv
+        # 将时区设置为上海时区，使 Git commit 时间戳与运行环境一致
+        commit_options: '--date="${{ env.TZ_OFFSET }}"'
+      env:
+        TZ_OFFSET: '+0800' # UTC+8 offset for commit timestamp
