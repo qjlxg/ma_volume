@@ -1,4 +1,4 @@
-# volume_bottom_scanner.py (最终优化版本：修复列名，收紧参数)
+# volume_bottom_scanner.py (最终稳定版本：兼容数据，收紧筛选)
 
 import os
 import pandas as pd
@@ -7,32 +7,32 @@ from datetime import datetime
 import glob
 import time
 
-# --- 1. 筛选条件配置 (已收紧参数) ---
+# --- 1. 筛选条件配置 (收紧后的参数) ---
 STOCK_DATA_DIR = 'stock_data'
 STOCK_NAMES_FILE = 'stock_names.csv'
-PRICE_MIN = 8.0          # 【调整】最新收盘价不低于 8.0 元 (原 5.0)
-VOLUME_PERIOD = 120      # 【调整】计算天量时的周期 N (原 60)，使用 120 天天量
-PRICE_LOW_PERIOD = 40    # 【调整】价格低位确认周期 M (原 20)，使用 40 天低位
-VOLUME_SHRINK_RATIO = 0.10  # 【调整】缩量比例 10% (原 0.20/20%)
-PRICE_LOW_RANGE_RATIO = 0.10 # 【新增】要求最新价在 PRICE_LOW_PERIOD 周期内最低价的 10% 范围内
+PRICE_MIN = 8.0          # 股价筛选：最新收盘价不低于 8.0 元 
+VOLUME_PERIOD = 120      # 缩量周期：计算天量时的历史周期 N
+PRICE_LOW_PERIOD = 40    # 低位周期：价格低位确认周期 M
+VOLUME_SHRINK_RATIO = 0.10  # 缩量比例：最新成交量 <= 天量的 10% 
+PRICE_LOW_RANGE_RATIO = 0.10 # 低位范围：要求最新价在低位周期最低价的 10% 范围内
 
 # --- 2. 数据列名映射 (适配您的中文格式) ---
 DATE_COL = '日期'
 CLOSE_COL = '收盘'
 VOLUME_COL = '成交量'
-# 注意：如果您的CSV是用 TAB 或空格分隔的，请在 read_csv 中调整 sep 参数
 
 def load_stock_names():
-    """修复：加载股票代码和名称的映射表，假设 stock_names.csv 无标题行。"""
+    """加载股票代码和名称的映射表，适配 'code,name' 标题格式。"""
     print(f"尝试加载股票名称文件: {STOCK_NAMES_FILE}")
     try:
-        # 假设文件没有标题行 (header=None)，并手动指定列名
+        # 识别第一行作为标题，并使用小写 'code'
         names_df = pd.read_csv(
             STOCK_NAMES_FILE, 
-            header=None, 
-            names=['Code', 'Name'], 
-            dtype={'Code': str}
+            dtype={'code': str} 
         )
+        # 将列名统一为大写，便于脚本内部处理
+        names_df.columns = ['Code', 'Name'] 
+        
         names_df['Code'] = names_df['Code'].astype(str).str.strip().str.zfill(6) 
         print(f"成功加载 {len(names_df)} 条股票名称记录。")
         return names_df.set_index('Code')['Name'].to_dict()
@@ -41,11 +41,9 @@ def load_stock_names():
         return {}
 
 def analyze_stock_file(file_path):
-    """
-    分析单个股票的CSV文件，应用筛选条件。
-    已适配使用中文列名: '日期', '收盘', '成交量'
-    """
+    """分析单个股票的CSV文件，应用筛选条件。"""
     try:
+        # 注意：如果文件是 Tab 分隔，请修改为 pd.read_csv(file_path, sep='\t')
         df = pd.read_csv(file_path)
         
         # 确保数据按日期升序排列
@@ -58,7 +56,6 @@ def analyze_stock_file(file_path):
         latest_data = df.iloc[-1]
         code = os.path.basename(file_path).split('.')[0].zfill(6)
         
-        # 使用中文列名获取数据
         latest_close = latest_data[CLOSE_COL]
         latest_volume = latest_data[VOLUME_COL]
         
@@ -81,11 +78,9 @@ def analyze_stock_file(file_path):
         high_price = price_history.max()
         price_range = high_price - low_price
         
-        # 计算价格低位阈值：低点 + 10% * 价格范围
         low_threshold = low_price + PRICE_LOW_RANGE_RATIO * price_range
         
         if latest_close > low_threshold:
-            # 价格不在近期底部区域 (不在最低 10% 范围内)
             return None
 
         # 所有条件满足
@@ -102,7 +97,6 @@ def analyze_stock_file(file_path):
         print(f"Error: File {file_path} is missing expected column: {e}. Check your data format.")
         return None
     except Exception as e:
-        # 可以根据需要启用这行来调试其他类型的错误
         # print(f"Error processing file {file_path}: {e}")
         return None
 
@@ -134,26 +128,24 @@ def main():
                 results.append(result)
             
     
-    # 格式化输出文件路径
     current_time = datetime.now()
     output_dir = current_time.strftime('output/%Y/%m')
     os.makedirs(output_dir, exist_ok=True)
     timestamp = current_time.strftime('%Y%m%d_%H%M%S')
     final_output_path = os.path.join(output_dir, f'volume_bottom_scan_results_{timestamp}.csv')
 
+    output_columns = ['Code', 'Name', 'Latest_Close', 'Latest_Volume', 'Max_Volume_120d', 'Low_Price_40d_Threshold']
+
     if not results:
         print("\n扫描完成：没有股票满足筛选条件。")
-        # 创建一个空文件
-        pd.DataFrame(columns=['Code', 'Name', 'Latest_Close', 'Latest_Volume', 'Max_Volume_120d', 'Low_Price_40d_Threshold']).to_csv(final_output_path, index=False)
+        pd.DataFrame(columns=output_columns).to_csv(final_output_path, index=False)
         print(f"已创建空结果文件: {final_output_path}")
         return
 
-    # 将结果转换为 DataFrame 并匹配名称
     results_df = pd.DataFrame(results)
     results_df['Name'] = results_df['Code'].map(stock_names).fillna('未知名称')
 
-    # 排序和保存结果
-    results_df = results_df[['Code', 'Name', 'Latest_Close', 'Latest_Volume', 'Max_Volume_120d', 'Low_Price_40d_Threshold']]
+    results_df = results_df[output_columns]
     results_df.to_csv(final_output_path, index=False, encoding='utf-8-sig')
 
     print("\n--- 筛选结果 ---")
