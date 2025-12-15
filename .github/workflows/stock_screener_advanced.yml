@@ -25,20 +25,19 @@ jobs:
   run_screener:
     runs-on: ubuntu-latest
     
-    # 关键：确保 Action 有权限写入和推送
     permissions:
       contents: write # 显式授予写入权限
 
     env:
       TZ: 'Asia/Shanghai' 
+      # 💥 修正1: 明确定义 TZ_OFFSET，确保它不会丢失
+      TZ_OFFSET: '+0800' 
 
     steps:
     - name: ⬇️ Checkout Repository
-      # ⚠️ 必须使用 actions/checkout@v4，以便后续操作能使用 Git
       uses: actions/checkout@v4
       with:
-        # fetch-depth: 0 确保拉取所有历史记录，以更好地处理冲突
-        fetch-depth: 0 
+        fetch-depth: 0 # 拉取所有历史记录，以便处理冲突
 
     - name: 🐍 Set up Python
       uses: actions/setup-python@v5
@@ -54,26 +53,30 @@ jobs:
       run: python stock_screener_advanced.py
 
     - name: 💾 Commit and Push Results
-      # 仅使用 file_pattern，移除所有可能引起 v5 报错的额外参数
       uses: stefanzweifel/git-auto-commit-action@v5
       with:
         commit_message: "Automated: Add new stock screening results"
         file_pattern: output/**/*.csv 
-        commit_options: '--date="${{ env.TZ_OFFSET }}"'
-        # ⭐ 新增：在推送前执行拉取并尝试合并 (这是 Action 的内置功能，不需要 pull_options 参数)
-        # 如果 Action 内部的自动拉取仍失败，我们将尝试在下一步使用强制推送。
-        
-    - name: 🚨 Fallback
-      # 如果上一步失败，这说明远程仓库在我们提交期间被修改了。
-      # 我们将使用一个单独的 Git 命令来确保推送。
+        # 💥 修正2: 确保使用 env.TZ_OFFSET
+        commit_options: '--date="${{ env.TZ_OFFSET }}"' 
+
+    - name: 🚨 
+      # 仅在上一步失败时执行 (通常是由于远程分支更新导致推送被拒绝)
       if: failure()
       run: |
-        echo "Auto-commit failed due to remote changes. Pulling and retrying push."
-        # 配置 Git 身份
+        echo "Auto-commit failed due to Git conflict. Initiating fallback push."
+        
+        # 1. 强制将生成的新文件添加到暂存区
+        # 💥 修正3: 解决 'Your index contains uncommitted changes' 错误
+        git add output/**/*.csv 
+
+        # 2. 配置 Git 身份 (若 Action 失败可能丢失)
         git config user.name "github-actions[bot]"
         git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-        # 尝试拉取远程，并使用 'ours' 策略解决冲突 (我们只关心自己的输出文件)
-        # 更好的方法是 rebase
+        
+        # 3. 拉取远程更改，并将我们的 commit 放在最上面
         git pull --rebase
-        # 最后，强制推送
+        
+        # 4. 强制推送 (因为我们已经解决了冲突)
         git push -f
+        echo "Fallback push successful."
