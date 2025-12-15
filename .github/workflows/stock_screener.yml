@@ -33,7 +33,7 @@ jobs:
   filter_and_commit:
     runs-on: ubuntu-latest
     
-    # 设置工作环境的时区为上海时区 (Asia/Shanghai)，确保 Python 脚本的时间戳正确
+    # 设置工作环境的时区为上海时区 (Asia/Shanghai)，确保 Python 脚本和 Shell 命令的时间戳正确
     env:
       TZ: Asia/Shanghai
 
@@ -72,8 +72,11 @@ jobs:
             echo "New results found, staging files..."
             git add results/
             
-            # 使用上海时区的时间作为 commit 信息
+            # 修正：将 COMMIT_TIME 的计算和变量传递放在一起
+            # 确保 date 命令在 TZ 环境变量下执行
             COMMIT_TIME=$(date '+%Y-%m-%d %H:%M:%S %Z')
+            
+            # 使用 Shell 变量进行提交
             git commit -m "📈 Auto-Screen: Results pushed at ${COMMIT_TIME} (Shanghai)"
             
             echo "Committing and pushing results..."
