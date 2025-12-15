@@ -10,15 +10,18 @@ import pytz
 STOCK_DATA_DIR = 'stock_data'
 STOCK_NAMES_FILE = 'stock_names.csv'
 MIN_CLOSE_PRICE = 5.0
-LOWER_SHADOW_RATIO = 0.6
+
+# --- 筛选条件收紧 ---
+LOWER_SHADOW_RATIO = 0.75  # 增加到 75%，下影线必须占据总价格区间的 75% 以上
+MIN_TURNOVER_RATE = 1.0    # 新增条件：要求当日换手率至少为 1.0%
 
 # --- 中文列名映射 ---
-# 确保脚本能识别您的数据格式
 COLUMNS_MAP = {
     'Open': '开盘',
     'Close': '收盘',
     'High': '最高',
-    'Low': '最低'
+    'Low': '最低',
+    'TurnoverRate': '换手率' # 引入换手率的中文列名
 }
 REQUIRED_COLS = list(COLUMNS_MAP.values())
 
@@ -26,11 +29,9 @@ REQUIRED_COLS = list(COLUMNS_MAP.values())
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 def load_stock_names(filepath):
-    """加载股票代码和名称的映射表"""
+    # ... (此函数未更改) ...
     try:
-        # 假设 stock_names.csv 包含 'code' 和 'name' 列
         df = pd.read_csv(filepath, dtype={'code': str})
-        # 确保代码是6位数，如果不是，前面补零
         df['code'] = df['code'].apply(lambda x: x.zfill(6))
         return df.set_index('code')['name'].to_dict()
     except Exception as e:
@@ -40,45 +41,46 @@ def load_stock_names(filepath):
 def process_file(file_path):
     """
     处理单个 CSV 文件，筛选符合条件的股票。
-    现在假设 CSV 文件表头使用中文: 日期, 股票代码, 开盘, 收盘, 最高, 最低, ...
     """
     try:
-        # 从文件名中提取股票代码，假设文件名是 XXXXXX.csv
         basename = os.path.basename(file_path)
         stock_code = os.path.splitext(basename)[0].zfill(6)
         
-        # 使用 engine='python' 避免 C engine 无法处理中文字符集的问题
+        # 增加换手率列的检查
+        current_required_cols = REQUIRED_COLS
         df = pd.read_csv(file_path, engine='python')
 
         if df.empty:
             logging.warning(f"文件 {basename} 是空的。跳过。")
             return None
 
-        # --- 鲁棒性增强：检查必需的中文列 ---
-        if not all(col in df.columns for col in REQUIRED_COLS):
-            missing_cols = [col for col in REQUIRED_COLS if col not in df.columns]
-            # 记录警告，明确指出缺少哪些关键列
+        # --- 鲁棒性增强：检查必需的中文列 (包含换手率) ---
+        if not all(col in df.columns for col in current_required_cols):
+            missing_cols = [col for col in current_required_cols if col not in df.columns]
             logging.warning(f"文件 {basename} (代码: {stock_code}) 缺少必需的中文列: {missing_cols}。跳过。")
             return None
         # --- 鲁棒性增强结束 ---
         
-        # 确保数据已按时间排序，取最后一行（最新数据）
         latest_data = df.iloc[-1]
         
-        # 提取关键价格，使用中文列名
+        # 提取关键价格和换手率
         close = latest_data[COLUMNS_MAP['Close']]
         open_price = latest_data[COLUMNS_MAP['Open']]
         high = latest_data[COLUMNS_MAP['High']]
         low = latest_data[COLUMNS_MAP['Low']]
+        turnover_rate = latest_data[COLUMNS_MAP['TurnoverRate']]
 
         # 1. 最新收盘价不能低于 5.0 元
         if close < MIN_CLOSE_PRICE:
             return None
         
-        # 2. 筛选带显著下影线的K线（止跌信号）
+        # 2. 新增条件：换手率必须高于 MIN_TURNOVER_RATE
+        if turnover_rate < MIN_TURNOVER_RATE:
+            return None
+            
+        # 3. 筛选带显著下影线的K线（使用更高的比例）
         total_range = high - low
         
-        # 避免除以接近零的值（即当日价格波动极小）
         if total_range < 0.01: 
             return None
 
@@ -95,13 +97,12 @@ def process_file(file_path):
         return None
 
     except Exception as e:
-        # 捕获其他可能的错误，例如数据类型转换错误
         logging.warning(f"处理文件 {file_path} 时发生错误: {e}")
         return None
 
 def main():
     start_time = datetime.now()
-    logging.info("--- 启动股票筛选程序 ---")
+    logging.info("--- 启动股票筛选程序 (已收紧条件) ---")
     
     # 1. 加载股票名称映射
     stock_names = load_stock_names(STOCK_NAMES_FILE)
