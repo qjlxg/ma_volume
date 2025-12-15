@@ -10,7 +10,7 @@ on:
   schedule:
     # 每天 18:00 北京时间 (上海时区) 运行
     # GitHub Actions 使用 UTC。北京时间 (UTC+8) 18:00 对应 UTC 时间 10:00
-    - cron: '0 10 * * *'
+    - cron: '0 15 * * *'
   push:
     paths:
       - 'bullish_reversal_scanner.py'

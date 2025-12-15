@@ -10,7 +10,7 @@ on:
   # 2. 定时触发：每天 18:00 (北京时间) 运行
   # GitHub Actions 使用 UTC 时间，北京时间 (CST/GMT+8) 18:00 对应 UTC 10:00
   schedule:
-    - cron: '0 10 * * *'
+    - cron: '0 15 * * *'
     
   # 3. 脚本和工作流文件变动时自动运行
   push:

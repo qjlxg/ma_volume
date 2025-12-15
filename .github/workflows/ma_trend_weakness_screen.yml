@@ -22,7 +22,7 @@ on:
   # 3. 定时触发：每天 18:00 北京时间 (UTC+8)
   # 18:00 BJT 等同于 10:00 UTC (cron 表达式以 UTC 为基准)
   schedule:
-    - cron: '0 10 * * *'
+    - cron: '0 15 * * *'
 
 jobs:
   run_screening_and_push:

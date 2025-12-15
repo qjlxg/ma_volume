@@ -19,7 +19,7 @@ on:
   # 北京时间 18:00 (UTC+8) 对应 UTC 时间 10:00。
   # cron 表达式: 分 时 日 月 周 (这里设置为 UTC 10:10)
   schedule:
-    - cron: '10 10 * * *'
+    - cron: '15 15 * * *'
 
 jobs:
   run_scanner_and_push_results:
