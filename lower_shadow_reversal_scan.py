@@ -1,159 +1,160 @@
-# volume_bottom_scanner.py (修复 'Code' 错误版本)
-
-import os
 import pandas as pd
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
+import os
 import glob
-import time # 引入 time 库，确保文件名时间戳的唯一性
+import logging
+from multiprocessing import Pool, cpu_count
+from datetime import datetime
+import pytz
 
-# --- 配置参数 ---
+# --- 配置 ---
 STOCK_DATA_DIR = 'stock_data'
 STOCK_NAMES_FILE = 'stock_names.csv'
-PRICE_MIN = 5.0  # 最新收盘价不低于 5.0 元
-VOLUME_PERIOD = 60  # 计算天量时的周期 N
-PRICE_LOW_PERIOD = 20  # 价格低位确认周期 M
-VOLUME_SHRINK_RATIO = 0.20  # 缩量比例 20%
+MIN_CLOSE_PRICE = 5.0
+LOWER_SHADOW_RATIO = 0.6
 
-def load_stock_names():
-    """修复：加载股票代码和名称的映射表，假设 CSV 无标题行。"""
-    print(f"尝试加载股票名称文件: {STOCK_NAMES_FILE}")
+# --- 中文列名映射 ---
+# 确保脚本能识别您的数据格式
+COLUMNS_MAP = {
+    'Open': '开盘',
+    'Close': '收盘',
+    'High': '最高',
+    'Low': '最低'
+}
+REQUIRED_COLS = list(COLUMNS_MAP.values())
+
+# 设置日志
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+def load_stock_names(filepath):
+    """加载股票代码和名称的映射表"""
     try:
-        # 假设文件没有标题行 (header=None)，并手动指定列名
-        names_df = pd.read_csv(
-            STOCK_NAMES_FILE, 
-            header=None, 
-            names=['Code', 'Name'], 
-            dtype={'Code': str}
-        )
-        # 确保代码是 6 位，并去除可能的空格或引号
-        names_df['Code'] = names_df['Code'].astype(str).str.strip().str.zfill(6) 
-        print(f"成功加载 {len(names_df)} 条股票名称记录。")
-        return names_df.set_index('Code')['Name'].to_dict()
+        # 假设 stock_names.csv 包含 'code' 和 'name' 列
+        df = pd.read_csv(filepath, dtype={'code': str})
+        # 确保代码是6位数，如果不是，前面补零
+        df['code'] = df['code'].apply(lambda x: x.zfill(6))
+        return df.set_index('code')['name'].to_dict()
     except Exception as e:
-        print(f"Error loading stock names (已修复加载逻辑): {e}")
-        # 如果读取失败，返回空字典，避免后续出错
+        logging.error(f"加载股票名称文件失败: {e}")
         return {}
 
-# (其余函数 analyze_stock_file 和 main 保持不变，但为了完整性，再次提供完整代码)
-
-def analyze_stock_file(file_path):
-    """分析单个股票的CSV文件，应用筛选条件。"""
+def process_file(file_path):
+    """
+    处理单个 CSV 文件，筛选符合条件的股票。
+    现在假设 CSV 文件表头使用中文: 日期, 股票代码, 开盘, 收盘, 最高, 最低, ...
+    """
     try:
-        # 注意：这里假设您的数据文件包含 'Date', 'Close', 'Volume' 列
-        df = pd.read_csv(file_path)
-        df = df.sort_values(by='Date').reset_index(drop=True)
+        # 从文件名中提取股票代码，假设文件名是 XXXXXX.csv
+        basename = os.path.basename(file_path)
+        stock_code = os.path.splitext(basename)[0].zfill(6)
         
-        if len(df) < max(VOLUME_PERIOD, PRICE_LOW_PERIOD):
+        # 使用 engine='python' 避免 C engine 无法处理中文字符集的问题
+        df = pd.read_csv(file_path, engine='python')
+
+        if df.empty:
+            logging.warning(f"文件 {basename} 是空的。跳过。")
             return None
 
+        # --- 鲁棒性增强：检查必需的中文列 ---
+        if not all(col in df.columns for col in REQUIRED_COLS):
+            missing_cols = [col for col in REQUIRED_COLS if col not in df.columns]
+            # 记录警告，明确指出缺少哪些关键列
+            logging.warning(f"文件 {basename} (代码: {stock_code}) 缺少必需的中文列: {missing_cols}。跳过。")
+            return None
+        # --- 鲁棒性增强结束 ---
+        
+        # 确保数据已按时间排序，取最后一行（最新数据）
         latest_data = df.iloc[-1]
-        code = os.path.basename(file_path).split('.')[0].zfill(6)
-        latest_close = latest_data.get('Close', float('inf')) # 使用 .get() 应对缺失列
-        latest_volume = latest_data.get('Volume', 0)
         
+        # 提取关键价格，使用中文列名
+        close = latest_data[COLUMNS_MAP['Close']]
+        open_price = latest_data[COLUMNS_MAP['Open']]
+        high = latest_data[COLUMNS_MAP['High']]
+        low = latest_data[COLUMNS_MAP['Low']]
+
         # 1. 最新收盘价不能低于 5.0 元
-        if latest_close < PRICE_MIN:
-            return None
-
-        history_df = df.iloc[-VOLUME_PERIOD:]
-        
-        # 2. 缩量见底条件
-        max_volume = history_df['Volume'].max()
-        
-        if latest_volume > max_volume * VOLUME_SHRINK_RATIO:
-            # 最新成交量超过天量的 20%
+        if close < MIN_CLOSE_PRICE:
             return None
         
-        # 3. 价格低位确认 (最新价处于过去 PRICE_LOW_PERIOD 天的底部 25% 范围内)
-        price_history = df.iloc[-PRICE_LOW_PERIOD:]['Close']
-        low_price = price_history.min()
-        high_price = price_history.max()
-        price_range = high_price - low_price
+        # 2. 筛选带显著下影线的K线（止跌信号）
+        total_range = high - low
         
-        # 计算价格低位阈值：低点 + 25% * 价格范围
-        low_threshold = low_price + 0.25 * price_range
-        
-        if latest_close > low_threshold:
-            # 价格不在近期底部区域 (不在最低 25% 范围内)
+        # 避免除以接近零的值（即当日价格波动极小）
+        if total_range < 0.01: 
             return None
 
-        # 所有条件满足
-        return {
-            'Code': code,
-            'Name': '', 
-            'Latest_Close': latest_close,
-            'Latest_Volume': latest_volume,
-            'Max_Volume_60d': max_volume,
-            'Low_Price_20d_Threshold': low_threshold
-        }
+        # 下影线长度：较小值(开盘价, 收盘价) - 最低价
+        lower_shadow = min(open_price, close) - low
+        
+        # 下影线占总区间比例
+        ratio = lower_shadow / total_range
 
-    except KeyError:
-        # 如果数据文件缺少 'Close' 或 'Volume' 列，跳过
-        print(f"Warning: File {file_path} is missing 'Close' or 'Volume' column.")
+        if ratio >= LOWER_SHADOW_RATIO:
+            # 返回符合条件的股票代码
+            return stock_code
+        
         return None
+
     except Exception as e:
-        # print(f"Error processing file {file_path}: {e}")
+        # 捕获其他可能的错误，例如数据类型转换错误
+        logging.warning(f"处理文件 {file_path} 时发生错误: {e}")
         return None
 
 def main():
-    """主函数，管理并行处理和结果输出。"""
-    print(f"--- 启动缩量见底扫描 (价格 >= {PRICE_MIN}，缩量 <= {VOLUME_SHRINK_RATIO*100}%) ---")
+    start_time = datetime.now()
+    logging.info("--- 启动股票筛选程序 ---")
     
-    # 确保 stock_data 目录存在
-    if not os.path.isdir(STOCK_DATA_DIR):
-        print(f"Error: Directory '{STOCK_DATA_DIR}' not found. Please ensure your data is in this folder.")
+    # 1. 加载股票名称映射
+    stock_names = load_stock_names(STOCK_NAMES_FILE)
+    if not stock_names:
+        logging.error("无法获取股票名称数据，程序终止。")
         return
 
-    # 获取所有股票数据文件路径
-    all_files = glob.glob(os.path.join(STOCK_DATA_DIR, '*.csv'))
+    # 2. 获取所有数据文件列表
+    search_path = os.path.join(STOCK_DATA_DIR, '*.csv')
+    all_files = glob.glob(search_path)
+    
     if not all_files:
-        print(f"Error: No CSV files found in {STOCK_DATA_DIR}")
+        logging.error(f"在目录 {STOCK_DATA_DIR} 中未找到任何 CSV 文件。")
         return
 
-    stock_names = load_stock_names()
-    results = []
+    logging.info(f"找到 {len(all_files)} 个数据文件，开始并行处理...")
 
-    # 使用线程池进行并行处理以加速
-    # os.cpu_count() * 2 是一个常用的经验值，但也可以根据实际环境调整
-    workers = os.cpu_count() * 2 if os.cpu_count() else 4
-    print(f"使用 {workers} 个工作线程并行扫描 {len(all_files)} 个文件...")
-    
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        future_to_file = {executor.submit(analyze_stock_file, file_path): file_path for file_path in all_files}
+    # 3. 使用多进程并行处理
+    with Pool(cpu_count()) as pool:
+        results = pool.map(process_file, all_files)
+
+    # 4. 收集和整理结果
+    filtered_codes = [code for code in results if code is not None]
+
+    if not filtered_codes:
+        logging.info("未筛选到任何符合条件的股票。")
+        result_df = pd.DataFrame(columns=['Code', 'Name'])
+    else:
+        result_list = []
+        for code in filtered_codes:
+            name = stock_names.get(code, '未知名称')
+            result_list.append({'Code': code, 'Name': name})
         
-        for i, future in enumerate(as_completed(future_to_file)):
-            result = future.result()
-            if result:
-                results.append(result)
-            
+        result_df = pd.DataFrame(result_list)
+        logging.info(f"筛选到 {len(result_df)} 个符合条件的股票。")
+
+    # 5. 生成带时间戳的输出文件名并保存
+    shanghai_tz = pytz.timezone('Asia/Shanghai')
+    now_shanghai = datetime.now(shanghai_tz)
     
-    # 格式化输出文件路径
-    current_time = datetime.now()
-    output_dir = current_time.strftime('output/%Y/%m')
+    output_dir = now_shanghai.strftime('%Y/%m')
     os.makedirs(output_dir, exist_ok=True)
-    timestamp = current_time.strftime('%Y%m%d_%H%M%S')
-    final_output_path = os.path.join(output_dir, f'volume_bottom_scan_results_{timestamp}.csv')
+    
+    timestamp_str = now_shanghai.strftime('%Y%m%d_%H%M%S')
+    output_filename = f"result_{timestamp_str}.csv"
+    output_path = os.path.join(output_dir, output_filename)
+    
+    # 保存结果
+    result_df.to_csv(output_path, index=False, encoding='utf-8')
+    logging.info(f"筛选结果已保存至: {output_path}")
+    
+    end_time = datetime.now()
+    logging.info(f"--- 筛选程序运行结束，耗时: {end_time - start_time} ---")
 
-    if not results:
-        print("\n扫描完成：没有股票满足筛选条件。")
-        # 创建一个空文件，防止后续 Git 提交失败
-        pd.DataFrame(columns=['Code', 'Name', 'Latest_Close', 'Latest_Volume', 'Max_Volume_60d', 'Low_Price_20d_Threshold']).to_csv(final_output_path, index=False)
-        print(f"已创建空结果文件: {final_output_path}")
-        return
-
-    # 将结果转换为 DataFrame 并匹配名称
-    results_df = pd.DataFrame(results)
-    results_df['Name'] = results_df['Code'].map(stock_names).fillna('未知名称')
-
-    # 排序和保存结果
-    results_df = results_df[['Code', 'Name', 'Latest_Close', 'Latest_Volume', 'Max_Volume_60d', 'Low_Price_20d_Threshold']]
-    results_df.to_csv(final_output_path, index=False, encoding='utf-8-sig')
-
-    print("\n--- 筛选结果 ---")
-    print(results_df.to_string(index=False))
-    print(f"\n扫描完成，共找到 {len(results_df)} 只满足条件的股票。")
-    print(f"结果已保存到: {final_output_path}")
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
