@@ -1,0 +1,75 @@
+name: Breakout Scanner (股票突破形态筛选)
+
+on:
+  # 1. 手动触发
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: '手动运行的原因'
+        required: false
+        default: 'Manual trigger'
+
+  # 2. 代码变动时自动运行 (当脚本或工作流文件发生变化时)
+  push:
+    paths:
+      - 'breakout_scanner.py'
+      - '.github/workflows/breakout_scanner.yml'
+
+  # 3. 定时触发：每天 18:00 (北京时间/上海时区)
+  # 北京时间 18:00 (UTC+8) 对应 UTC 时间 10:00。
+  # cron 表达式: 分 时 日 月 周 (这里设置为 UTC 10:10)
+  schedule:
+    - cron: '10 10 * * *'
+
+jobs:
+  run_scanner_and_push_results:
+    # 使用最新的 Ubuntu 环境
+    runs-on: ubuntu-latest
+    
+    # 设置时区为上海，确保 Python 脚本中的 datetime.now() 使用正确的时间
+    env:
+      TZ: Asia/Shanghai
+
+    steps:
+      - name: 1. 检出仓库代码 (Checkout Repository)
+        uses: actions/checkout@v4
+
+      - name: 2. 设置 Python 环境 (Setup Python)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x' 
+      
+      - name: 3. 安装依赖 (Install dependencies)
+        run: |
+          # 安装 pandas 和其它可能需要的库
+          python -m pip install --upgrade pip
+          pip install pandas
+
+      - name: 4. 运行股票筛选脚本 (Run Scanner Script)
+        # 运行脚本，结果将保存在本地的 scanned_results 目录下
+        run: |
+          python breakout_scanner.py
+      
+      - name: 5. 检查是否有结果文件生成 (Check for results)
+        id: check_results
+        # 检查 scanned_results 目录是否存在
+        run: |
+          if [ -d "scanned_results" ]; then
+            echo "::set-output name=found::true"
+          else
+            echo "::set-output name=found::false"
+          fi
+        # NOTE: GitHub Actions v4+ 推荐使用 $GITHUB_OUTPUT 环境变量代替 ::set-output
+        # 为了兼容性，暂时保留，但现代做法是 echo "found=true" >> $GITHUB_OUTPUT
+
+      - name: 6. 推送结果到仓库 (Commit and Push Results)
+        # 仅在有结果文件生成时执行
+        if: steps.check_results.outputs.found == 'true'
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          # 只追踪 scanned_results 目录下的文件
+          file_pattern: 'scanned_results/**/*.csv'
+          # 提交信息
+          commit_message: 'Automated: Stock breakout scan results for ${{ env.TZ }}'
+          # 推送到 GitHub 仓库
+          branch: ${{ github.ref_name }}
