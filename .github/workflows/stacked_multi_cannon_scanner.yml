@@ -1,8 +1,7 @@
 name: 叠形多方炮形态扫描器
 
 # 脚本和工作流文件名统一
-run-name: 股票形态扫描: ${{ github.event_name }} triggered by @${{ github.actor }}
-
+run-name: 股票形态扫描
 # 触发条件
 on:
   # 1. 手动触发
