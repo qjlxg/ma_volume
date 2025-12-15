@@ -63,7 +63,7 @@ jobs:
         # ⭐ 新增：在推送前执行拉取并尝试合并 (这是 Action 的内置功能，不需要 pull_options 参数)
         # 如果 Action 内部的自动拉取仍失败，我们将尝试在下一步使用强制推送。
         
-    - name: 🚨 Fallback: Force Push if Commit Failed (Optional but reliable)
+    - name: 🚨 Fallback
       # 如果上一步失败，这说明远程仓库在我们提交期间被修改了。
       # 我们将使用一个单独的 Git 命令来确保推送。
       if: failure()
