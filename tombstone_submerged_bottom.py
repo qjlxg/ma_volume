@@ -10,7 +10,7 @@ STOCK_NAMES_FILE = 'stock_names.csv'
 MIN_CLOSE_PRICE = 5.0  # 股价下限
 MAX_CLOSE_PRICE = 20.0 # 股价上限
 # K线最高点和最低点对齐的容忍度 (例如: 0.01 = 1%)
-ALIGNMENT_TOLERANCE = 0.01 
+ALIGNMENT_TOLERANCE = 0.05
 SHANGHAI_TZ = pytz.timezone('Asia/Shanghai')
 
 # K线数据列名映射 (匹配您的中文CSV格式)
