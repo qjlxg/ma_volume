@@ -1,0 +1,77 @@
+name: Stock Reversal Screener Analysis
+
+# 定义触发机制
+on:
+  # 1. 手动触发
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: 'Manual run reason (e.g., Testing, Urgent Update)'
+        required: false
+        default: 'Manual Trigger'
+
+  # 2. 定时触发 (每天 18:00 北京时间 / UTC+8)
+  schedule:
+    # 每天 10:00 UTC (即 18:00 北京时间/上海时间) 运行
+    - cron: '0 10 * * *'
+
+  # 3. 脚本和工作流文件变动时自动运行
+  push:
+    branches:
+      - main
+    paths:
+      # 关注新的脚本名称
+      - 'stock_reversal_screener.py' 
+      # 关注新的工作流名称
+      - '.github/workflows/stock_reversal_screener.yml'
+
+jobs:
+  run_screener:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 
+          token: ${{ secrets.GITHUB_TOKEN }}
+          
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x' 
+
+      - name: Install Dependencies
+        run: pip install pandas joblib
+
+      # 设置上海时区
+      - name: Set Timezone to Asia/Shanghai
+        run: echo "TZ=Asia/Shanghai" >> $GITHUB_ENV
+        
+      - name: Execute Stock Screener Script
+        # 调用新的脚本名称
+        run: python stock_reversal_screener.py
+
+      # --- 推送结果到仓库 ---
+      - name: Configure Git for Push
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email github-actions[bot]@users.noreply.github.com
+          
+      - name: Add and Commit Results
+        # 将新生成的文件添加到暂存区
+        run: |
+          if [ -d "screener_results" ]; then
+            git add screener_results/*.csv screener_results/*/*.csv
+            if git diff --cached --exit-code; then
+              echo "No new results to commit."
+            else
+              git commit -m "📈 Auto: Update stock screening results [${{ github.event_name }}]"
+              echo "New results committed."
+            fi
+          else
+            echo "Output directory 'screener_results' not found. Script might have failed or found no match."
+          fi
+
+      - name: Push Changes to Main Branch
+        run: git push
