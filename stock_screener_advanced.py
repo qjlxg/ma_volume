@@ -5,8 +5,7 @@ import logging
 from datetime import datetime
 from concurrent.futures import ProcessPoolExecutor
 
-# 配置日志
-# 级别设置为 WARNING，减少正常运行时 INFO 日志的输出，让 Action 运行日志更简洁
+# 配置日志：设置为 WARNING 级别，使 GitHub Actions 运行日志更简洁
 logging.basicConfig(level=logging.WARNING, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # --- 配置 ---
@@ -19,7 +18,7 @@ MAX_WORKERS = 4  # 并行进程数
 MIN_PRICE = 5.0
 MAX_PRICE = 20.0
 
-# 定义CSV文件中的关键列名
+# 定义CSV文件中的关键列名 (根据用户提供格式)
 COL_DATE = '日期'
 COL_CLOSE = '收盘'
 COL_LOW = '最低'
@@ -29,7 +28,7 @@ COL_VOLUME = '成交量'
 
 def meets_tech_criteria(df: pd.DataFrame) -> bool:
     """
-    实现图中的技术分析筛选条件 (基于量价和回踩确认)。
+    实现图中的技术分析筛选条件：放量突破后的回踩三天不破买入。
     """
     # 需要至少25天数据来计算MA20和检查回踩
     if df.empty or len(df) < 25: 
@@ -46,14 +45,24 @@ def meets_tech_criteria(df: pd.DataFrame) -> bool:
 
     # --- 条件量化 ---
     
-    # C1: 最新收盘价高于20日均线 (上升趋势确认)
+    # 尝试获取 3 个交易日前（倒数第 4 行）的 MA20 值作为历史支撑参考
+    try:
+        # 修正：直接使用 Series 索引获取单个值，避免调用 Series 方法 (shift) 产生错误
+        ma20_three_days_ago = df['MA20'].iloc[-4]
+    except IndexError:
+        # 数据不足4天，无法计算回踩确认，返回 False
+        return False
+        
+    # C1: 上升趋势确认：最新收盘价高于20日均线 
     C1_Trend = latest[COL_CLOSE] > latest['MA20']
     
-    # C2: 模拟“回踩三天不破买入”：当前价格高于最近的支撑确认价
-    # 假设支撑位在MA20附近，且当前收盘价高于最近三天的最低价
-    C2_Retracement_Check = (latest[COL_CLOSE] > recent_lows) and (recent_lows > latest['MA20'].shift(3) * 0.99)
+    # C2: 回踩三天不破确认： 
+    #     a) 当前收盘价高于最近三天的最低价（避免在最低点当日买入）
+    #     b) 最近三天的最低价高于 3 天前的 MA20 支撑位 (0.99 容错)
+    C2_Retracement_Check = (latest[COL_CLOSE] > recent_lows) and \
+                           (recent_lows > ma20_three_days_ago * 0.99)
     
-    # C3: 模拟“放量突破”：今天成交量高于前5日平均成交量 (1.5倍)
+    # C3: 放量突破模拟：今天成交量高于前5日平均成交量 (1.5倍)
     latest_vol = latest[COL_VOLUME]
     avg_vol_5 = df[COL_VOLUME].iloc[-6:-1].mean()
     C3_Volume = latest_vol > avg_vol_5 * 1.5
@@ -73,8 +82,7 @@ def meets_basic_criteria(df: pd.DataFrame, stock_code: str) -> bool:
     # C4: 价格范围筛选 (5.0 元 <= 收盘价 <= 20.0 元)
     C4_Price_Range = (latest_close >= MIN_PRICE) and (latest_close <= MAX_PRICE)
     
-    # C5: 排除条件：ST, 30开头 (创业板)。只要深沪A股 (00, 60开头)。
-    # ST 股排除依赖于数据源，这里主要通过代码前缀排除 30 开头，只保留 00 和 60 开头。
+    # C5: 排除条件：30开头 (创业板) 和 ST。只保留深沪A股 (00, 60开头)。
     C5_Exchange_Exclude = stock_code.startswith('60') or stock_code.startswith('00')
     
     return C4_Price_Range and C5_Exchange_Exclude
@@ -83,26 +91,27 @@ def process_file(file_path: str) -> dict or None:
     """
     处理单个CSV文件并应用所有筛选条件。
     """
-    # 文件名格式：代码.csv
     stock_code = os.path.basename(file_path).split('.')[0]
     
     try:
+        # 1. 读取和清理数据
         df = pd.read_csv(file_path)
         df.sort_values(COL_DATE, inplace=True)
         df.dropna(inplace=True)
 
+        # 2. 应用基本面筛选
         if not meets_basic_criteria(df, stock_code):
             return None
         
+        # 3. 应用技术筛选
         if not meets_tech_criteria(df):
             return None
 
+        # 4. 通过筛选，返回结果
         latest_close = df.iloc[-1][COL_CLOSE]
-        # logging.info(f"✅ Found qualifying stock: {stock_code} @ {latest_close}") # 仅在调试时使用
         return {'Code': stock_code, 'Close': latest_close}
     
     except Exception as e:
-        # 记录处理单个文件时的错误
         logging.error(f"Error processing file {file_path}: {e}")
         return None
 
@@ -114,7 +123,7 @@ def main():
     file_paths = glob.glob(os.path.join(STOCK_DATA_DIR, '*.csv'))
     
     if not file_paths:
-        logging.error(f"FATAL: No CSV files found in {STOCK_DATA_DIR}. Please check the directory structure.")
+        logging.error(f"FATAL: No CSV files found in {STOCK_DATA_DIR}. Please check data path.")
         return
 
     # 2. 并行处理文件
@@ -140,7 +149,7 @@ def main():
     final_df = pd.merge(results_df, names_df, on='Code', how='left')
     final_df = final_df[['Code', 'StockName', 'Close']]
 
-    # 4. 保存结果
+    # 4. 保存结果到指定目录 (年月目录 + 时间戳文件名)
     current_time_str = datetime.now().strftime('%Y%m%d_%H%M%S')
     current_year_month = datetime.now().strftime('%Y-%m')
     
