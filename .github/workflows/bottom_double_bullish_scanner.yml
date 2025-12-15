@@ -1,0 +1,86 @@
+# 文件名: .github/workflows/bottom_double_bullish_scanner.yml
+
+name: '底部双倍阳: K线形态扫描器'
+
+# 触发条件配置
+on:
+  # 1. 每天 18:00 (北京时间) 定时触发
+  schedule:
+    # cron 表达式使用 UTC 时间。北京时间 18:00 (UTC+8) 对应 UTC 10:00。
+    - cron: '0 10 * * *' 
+
+  # 2. 手动触发
+  workflow_dispatch:
+
+  # 3. 脚本或工作流文件变动时自动触发
+  push:
+    branches:
+      - main  # 根据您的主分支名称修改
+    paths:
+      - 'bottom_double_bullish_scanner.py'
+      - '.github/workflows/bottom_double_bullish_scanner.yml'
+      - 'stock_names.csv' 
+      # 也可以根据需要添加 stock_data/ 目录的变动，但通常不建议
+
+# 运行的任务
+jobs:
+  scan_and_push:
+    runs-on: ubuntu-latest
+
+    # 设置时区为上海，确保 Python 脚本中的时间戳是正确的
+    env:
+      TZ: 'Asia/Shanghai'
+
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+        with:
+          # 需要 token 来推送回仓库
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 🐍 Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x' 
+
+      - name: ⚙️ Install dependencies (pandas, pytz)
+        run: pip install pandas pytz
+
+      - name: 🚀 Run Double Bullish Scanner Script
+        run: python bottom_double_bullish_scanner.py
+
+      # --- Git 配置与推送 ---
+      - name: 📝 Configure Git
+        run: |
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global user.name "github-actions[bot]"
+
+      - name: 🔍 Check for new/modified files
+        id: git_check
+        run: |
+          # 检查是否有新的 CSV 文件被创建 (在 年月/ 目录下)
+          # 注意：这里我们只关注脚本运行后创建的 年月/ 目录下的 CSV 文件
+          NEW_FILES=$(find . -path "./20[0-9][0-9]-[0-9][0-9]/*_scanner_*.csv" -print -quit)
+          if [ -n "$NEW_FILES" ]; then
+            echo "::set-output name=files_changed::true"
+          else
+            echo "::set-output name=files_changed::false"
+          fi
+
+      - name: 📦 Add and Commit results
+        if: steps.git_check.outputs.files_changed == 'true'
+        run: |
+          # 添加 年月/ 目录下的所有 CSV 文件
+          git add --force 20[0-9][0-9]-[0-9][0-9]/*.csv
+          
+          # 提交更改
+          COMMIT_MSG="[Action] 底部双倍阳形态扫描结果：$(date +'%Y-%m-%d %H:%M:%S')"
+          git commit -m "$COMMIT_MSG"
+          echo "Changes committed."
+
+      - name: ⬆️ Push changes to repository
+        if: steps.git_check.outputs.files_changed == 'true'
+        uses: ad-m/github-push-action@master
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          branch: ${{ github.ref_name }} # 推送回当前分支
