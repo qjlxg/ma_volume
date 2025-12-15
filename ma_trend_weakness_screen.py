@@ -17,6 +17,7 @@ MAX_CLOSE_PRICE = 20.0 # 最新收盘价：最高限制
 
 def calculate_ma(df, period):
     """计算指定周期的移动平均线 (MA)"""
+    # 依赖于重命名后的 'Close' 列
     return df['Close'].rolling(window=period).mean()
 
 def check_stock_code_and_name(stock_code, stock_name, latest_close):
@@ -41,12 +42,11 @@ def check_stock_code_and_name(stock_code, stock_name, latest_close):
         # 非标准代码，排除
         return False, "排除：非标准6位代码"
         
-    # 创业板 (300xxx, 301xxx)
+    # 创业板 (300xxx) 检查
     if stock_code.startswith('30'):
         return False, "排除：创业板 (30开头)"
         
-    # 深沪 A 股代码范围检查 (排除科创板 688xxx, 北交所 8xxxx, 4xxxx)
-    # 只保留 上交所A股 (60xxxx) 和 深交所A股/中小板 (00xxxx, 002xxx, 003xxx)
+    # 深沪 A 股代码范围检查 (只保留 上交所A股 (60xxxx) 和 深交所A股/中小板 (00xxxx))
     if not (stock_code.startswith('60') or stock_code.startswith('00')):
         return False, "排除：非深沪A股 (非 60, 00 开头)"
 
@@ -63,11 +63,20 @@ def screen_stock(filepath):
         
         # 2. 读取数据
         df = pd.read_csv(filepath)
+        
+        # --- 💥 修正点 1: 列名映射 💥 ---
+        # 将实际的中文列名映射为代码中使用的英文列名
+        df = df.rename(columns={
+            '日期': 'Date',
+            '收盘': 'Close',
+        })
+        # -------------------------------
+        
+        # 清理和排序数据
         df = df.dropna(subset=['Close']).sort_values(by='Date').reset_index(drop=True)
         
+        # 确保数据足够
         if df.empty or len(df) < MA_PERIOD + SLOPE_CHECK_DAYS:
-            # 数据不足以计算均线和斜率
-            # print(f"警告：{stock_code} 数据不足。")
             return None
 
         # 3. 核心数据准备
@@ -76,21 +85,18 @@ def screen_stock(filepath):
         latest_close = latest_data['Close']
         latest_ma20 = latest_data['MA20']
 
-        # 4. 股票基本面和价格排除（这里先预排除价格，其他排除条件在主函数中利用 stock_names_df 进行）
-        # 预先进行价格范围检查
-        if latest_close < MIN_CLOSE_PRICE or latest_close > MAX_CLOSE_PRICE:
-            return None # 价格不符合，直接排除
-        
+        # 4. 股票基本面和价格排除 (预先进行价格范围检查)
+        if pd.isna(latest_close) or latest_close < MIN_CLOSE_PRICE or latest_close > MAX_CLOSE_PRICE:
+            return None
+            
         # 5. 技术面筛选条件: 20日均线趋势 (走平或向下)
         
-        # 确保有足够数据计算前 N 天的 MA20
-        if len(df) < MA_PERIOD + SLOPE_CHECK_DAYS:
-            return None
-
-        # 获取 N 天前的 MA20 值。
+        # 确保有足够数据计算前 N 天的 MA20 (N=SLOPE_CHECK_DAYS)
+        # N天前的数据在索引 -(N+1) 的位置
         ma20_n_days_ago = df.iloc[-(SLOPE_CHECK_DAYS + 1)]['MA20']
         
         # 核心逻辑：最新的 MA20 不大于前 N 天的 MA20，即斜率为负或零。
+        # 
         is_ma20_weakening = latest_ma20 <= ma20_n_days_ago
         
         if is_ma20_weakening:
@@ -101,6 +107,10 @@ def screen_stock(filepath):
                 'MA20_N_Days_Ago': ma20_n_days_ago
             }
 
+    except KeyError as e:
+        # 捕获列名缺失错误
+        print(f"处理文件 {filepath} 失败，可能缺少 '日期' 或 '收盘' 列: {e}")
+        return None
     except Exception as e:
         print(f"处理文件 {filepath} 失败: {e}")
         return None
@@ -129,7 +139,13 @@ def main():
 
     # 3. 匹配股票名称并应用全部排除条件
     try:
-        names_df = pd.read_csv(STOCK_NAMES_FILE, dtype={'Code': str})
+        # --- 💥 修正点 2: 股票名称文件列名 💥 ---
+        # 假设 stock_names.csv 列名为 code, name (小写)
+        names_df = pd.read_csv(STOCK_NAMES_FILE, dtype={'code': str})
+        
+        # 重命名列名以便与筛选结果合并
+        names_df = names_df.rename(columns={'code': 'Code', 'name': 'Name'})
+        
         names_df['Code'] = names_df['Code'].apply(lambda x: str(x).replace(".csv", ""))
         
         # 合并以获取股票名称，用于ST排除
@@ -153,8 +169,6 @@ def main():
         
         if is_passed:
             final_list.append(row)
-        # else:
-            # print(f"排除 {stock_code} ({stock_name}): {reason}") # 可以取消注释查看排除详情
 
     final_df = pd.DataFrame(final_list)
     
