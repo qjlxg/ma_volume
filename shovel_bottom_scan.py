@@ -10,79 +10,76 @@ STOCK_DATA_DIR = 'stock_data'
 STOCK_NAMES_FILE = 'stock_names.csv'
 RESULTS_BASE_DIR = 'results'
 MIN_CLOSING_PRICE = 5.0
-MAX_CLOSING_PRICE = 20.0  # 新增：收盘价上限
+MAX_CLOSING_PRICE = 20.0
 # 使用上海时区（与北京时间一致）
 TIMEZONE = pytz.timezone('Asia/Shanghai')
+
+# 定义一个全局变量来存储股票名称映射，供子进程使用
+GLOBAL_STOCK_NAMES = None 
 
 def load_stock_names(file_path):
     """加载股票代码和名称的映射表"""
     try:
         # 假设 stock_names.csv 格式为 Code, Name
         names_df = pd.read_csv(file_path, dtype={'Code': str})
-        # 确保列名是 'Code' 和 'Name'
+        
+        # 兼容性检查
         if 'Code' not in names_df.columns or 'Name' not in names_df.columns:
-             # 尝试自动修正列名，假设前两列是 Code 和 Name
             print("Warning: stock_names.csv columns might not be 'Code', 'Name'. Assuming first two columns.")
+            # 假设第一个是 Code，第二个是 Name
             names_df.columns = ['Code', 'Name'] + list(names_df.columns[2:])
 
         return names_df.set_index('Code')['Name'].to_dict()
     except Exception as e:
-        print(f"Error loading stock names: {e}")
+        # 在主进程中打印错误，不影响子进程
+        print(f"Error loading stock names: {e}") 
         return {}
         
+def initializer(stock_names_dict):
+    """
+    Pool 初始化函数，在每个子进程启动时调用。
+    将股票名称字典加载到每个子进程的全局变量 GLOBAL_STOCK_NAMES 中。
+    """
+    global GLOBAL_STOCK_NAMES
+    GLOBAL_STOCK_NAMES = stock_names_dict
+
 def check_stock_filters(code: str, name: str, close_price: float) -> bool:
     """
     检查股票代码、名称和价格是否符合筛选要求。
-    
-    1. 价格筛选: 5.0 <= Close <= 20.0
-    2. 排除 ST 股: 名称中不含 "ST" 或 "*ST"
-    3. 排除创业板: 代码不以 "30" 开头
-    4. 仅深沪 A 股: (默认通过代码规则实现，如 60/00开头，非 30/80/40 开头等)
     """
     
     # --- 1. 价格筛选 ---
     if not (MIN_CLOSING_PRICE <= close_price <= MAX_CLOSING_PRICE):
-        # print(f"Filter fail (Price): {code} - {close_price}")
         return False
 
     # --- 2. 排除 ST 股 ---
     if isinstance(name, str) and ("ST" in name.upper() or "*ST" in name.upper()):
-        # print(f"Filter fail (ST): {code} - {name}")
         return False
         
     # --- 3. 排除创业板 (30开头) ---
     if code.startswith('30'):
-        # print(f"Filter fail (GEM): {code}")
         return False
-        
-    # --- 4. 仅深沪 A 股 (排除科创板 688, 北交所 8/4 开头等)
-    # 此处假设数据源本身主要为深沪 A 股，但我们强化排除 688（科创板），尽管科创板也是沪市。
-    # 如果您明确要排除科创板，可以加上：
-    # if code.startswith('688'):
-    #     return False
         
     return True
 
 
 def check_shovel_bottom(df: pd.DataFrame) -> bool:
     """
-    检查“铲底形态”筛选条件 (形态逻辑不变)。
+    检查“铲底形态”筛选条件 (基于图片中的四根K线结构)。
     """
+    # 需要至少有 4 条数据来形成形态
     if len(df) < 4:
         return False
     
-    # 确保日期是降序（最新数据在前）
     # C1=最新, C2=次新, C3=第三新, C4=第四新
     c1, c2, c3, c4 = df.iloc[0], df.iloc[1], df.iloc[2], df.iloc[3]
-    
-    # --- 形态判断逻辑（与之前版本保持一致）---
     
     # 1. C4（最老）：大阴线 (Close < Open)，实体较大
     is_c4_bearish = c4['Close'] < c4['Open']
     c4_body_ratio = abs(c4['Close'] - c4['Open']) / (c4['High'] - c4['Low'] + 1e-6)
     is_c4_large_body = c4_body_ratio > 0.5 and abs(c4['Close'] - c4['Open']) > (c4['Open'] * 0.01)
     
-    # 2. C3（次老）：小实体 K 线，通常低点更低或持平
+    # 2. C3（次老）：小实体 K 线，体现止跌
     c3_body_ratio = abs(c3['Close'] - c3['Open']) / (c3['High'] - c3['Low'] + 1e-6)
     is_c3_small_body = c3_body_ratio < 0.4
     
@@ -100,7 +97,7 @@ def check_shovel_bottom(df: pd.DataFrame) -> bool:
     low_range = max(lows) - min(lows)
     is_bottom_area = low_range < (c4['Close'] * 0.02)
     
-    # 综合判断
+    # 综合判断 
     if (is_c4_bearish and is_c4_large_body and 
         is_c3_small_body and 
         is_c2_bullish and is_c2_large_body and is_c2_higher_than_c3 and
@@ -110,12 +107,15 @@ def check_shovel_bottom(df: pd.DataFrame) -> bool:
         
     return False
 
-def process_file(file_path, stock_names):
+def process_file(file_path):
     """
     处理单个 CSV 文件，检查形态条件和股票筛选条件。
+    从全局变量 GLOBAL_STOCK_NAMES 中获取名称。
     """
     stock_code = os.path.basename(file_path).replace('.csv', '')
-    stock_name = stock_names.get(stock_code, 'N/A')
+    
+    # 从子进程的全局变量中获取名称
+    stock_name = GLOBAL_STOCK_NAMES.get(stock_code, 'N/A')
     
     try:
         # 假设 CSV 包含 'Date', 'Open', 'High', 'Low', 'Close', 'Volume' 列
@@ -129,7 +129,7 @@ def process_file(file_path, stock_names):
         latest_close = df.iloc[0]['Close']
         latest_date = df.iloc[0]['Date'].strftime('%Y-%m-%d')
         
-        # --- 1. 首先进行股票基础筛选 ---
+        # --- 1. 首先进行股票基础筛选 (价格、ST、创业板) ---
         if not check_stock_filters(stock_code, stock_name, latest_close):
             return None
         
@@ -143,15 +143,17 @@ def process_file(file_path, stock_names):
             }
         
     except Exception as e:
+        # 在子进程中打印错误，便于调试
         print(f"Error processing file {file_path}: {e}")
         
     return None
 
 def main():
     start_time = datetime.now(TIMEZONE)
-    print(f"Starting scan at {start_time.strftime('%Y-%m-%d %H:%M:%S')} ({start_time.tzname()})")
+    # 修正：使用 strftime('%Z') 安全获取时区名称
+    print(f"Starting scan at {start_time.strftime('%Y-%m-%d %H:%M:%S')} ({start_time.strftime('%Z')})")
     
-    # 1. 加载股票名称
+    # 1. 加载股票名称 (仅在主进程中执行一次)
     stock_names = load_stock_names(STOCK_NAMES_FILE)
     
     # 2. 扫描所有数据文件
@@ -163,12 +165,10 @@ def main():
     print(f"Found {len(file_paths)} stock data files. Using {cpu_count()} cores for parallelism.")
 
     # 3. 使用多进程并行处理
-    # 传递 stock_names 到 process_file
-    def run_process_file(file_path):
-        return process_file(file_path, stock_names)
-
-    with Pool(cpu_count()) as pool:
-        results = pool.map(run_process_file, file_paths)
+    # 使用 initializer 和 initargs 将 stock_names 字典传递给子进程
+    # 解决了 PicklingError
+    with Pool(initializer=initializer, initargs=(stock_names,)) as pool:
+        results = pool.map(process_file, file_paths)
     
     # 4. 过滤有效结果
     matched_stocks = [r for r in results if r is not None]
