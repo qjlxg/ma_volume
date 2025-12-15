@@ -6,24 +6,45 @@ from concurrent.futures import ThreadPoolExecutor
 # --- 配置 ---
 STOCK_DATA_DIR = 'stock_data'
 STOCK_NAMES_FILE = 'stock_names.csv'
-MIN_CLOSE_PRICE = 5.0  # 最新收盘价不能低于 5.0 元
+MIN_CLOSE_PRICE = 5.0   # 最新收盘价最低限制
+MAX_CLOSE_PRICE = 20.0  # 最新收盘价最高限制
 RESULTS_BASE_DIR = '筛选结果'
-MAX_WORKERS = os.cpu_count() * 2 if os.cpu_count() else 4 # 并行处理的核心数
+MAX_WORKERS = os.cpu_count() * 2 if os.cpu_count() else 4
+
+# --- 辅助函数：检查股票代码和名称是否符合要求 ---
+def is_valid_stock(stock_code, stock_name):
+    """
+    检查股票是否为深沪A股，并排除ST股和创业板。
+    """
+    # 1. 排除ST股
+    if isinstance(stock_name, str) and ('ST' in stock_name.upper()):
+        return False
+        
+    # 2. 排除创业板（30开头）
+    if stock_code.startswith('30'):
+        return False
+        
+    # 3. 排除其他非深沪A股（例如：科创板688，北交所4/8开头等）
+    # 这里的目标是只保留深沪A股（60开头/00开头）
+    if stock_code.startswith(('4', '8', '688')):
+        return False
+        
+    return True
+
 
 # --- 筛选逻辑函数：基于图形分析的“后量过前量”模式 ---
-def analyze_stock(file_path):
+def analyze_stock(file_path, stock_names_map):
     """
-    分析单个股票的CSV数据，检查是否符合“后量过前量”且突破的形态。
-    
-    形态定义：
-    1. 最近一个交易日的收盘价 >= 5.0 元。
-    2. 今天的成交量 (Volume) 相比前 N 日的最高量有显著放大 (后量过前量/倍量)。
-    3. 今天的股价 (Close) 相比前 N 日的高点有向上突破。
-    
-    这里我们使用一个稍微宽松且实用的版本：
-    - 检查最近一个交易日是否放量突破了前期的震荡区间。
+    分析单个股票的CSV数据，检查是否符合量价形态、价格和类型要求。
     """
     try:
+        stock_code = os.path.basename(file_path).split('.')[0]
+        stock_name = stock_names_map.get(stock_code, "未知")
+
+        # --- 新增：股票类型和名称筛选 ---
+        if not is_valid_stock(stock_code, stock_name):
+            return None
+        
         # 1. 读取数据并排序
         df = pd.read_csv(file_path)
         # 确保数据按日期升序排列，并处理列名
@@ -32,7 +53,7 @@ def analyze_stock(file_path):
         elif 'trade_date' in df.columns:
              df.rename(columns={'trade_date': 'Date', 'close': 'Close', 'vol': 'Volume'}, inplace=True)
         else:
-             print(f"Warning: Columns not found in {file_path}")
+             # print(f"Warning: Columns not found in {file_path}")
              return None
 
         df['Date'] = pd.to_datetime(df['Date'])
@@ -45,15 +66,13 @@ def analyze_stock(file_path):
         # 2. 选取最近一个交易日的数据
         latest_day = df.iloc[-1]
         
-        # 3. 筛选条件 1: 最新收盘价不能低于 5.0 元
-        if latest_day['Close'] < MIN_CLOSE_PRICE:
+        # --- 新增：筛选条件 1: 最新收盘价在 5.0 到 20.0 之间 ---
+        latest_close = latest_day['Close']
+        if latest_close < MIN_CLOSE_PRICE or latest_close > MAX_CLOSE_PRICE:
             return None
             
-        # 4. 筛选条件 2: “后量过前量”的放量突破形态
-        # 检查前 10 个交易日的量价情况
+        # 3. 筛选条件 2: “后量过前量”的放量突破形态
         period = 10 
-        
-        # 前 period 日的数据 (不包含最新一天)
         pre_period_df = df.iloc[-period-1:-1]
         
         if pre_period_df.empty:
@@ -64,19 +83,15 @@ def analyze_stock(file_path):
         max_volume_pre_period = pre_period_df['Volume'].max()
         max_close_pre_period = pre_period_df['Close'].max()
         
-        # 判断条件：
         # a) 后量过前量（当前量显著大于前 period 日的最高量，例如大于1.5倍）
-        #    * 注: “倍量”是强力信号，这里放宽到显著放量。
         volume_condition = (latest_volume > max_volume_pre_period * 1.5)
         
         # b) 向上突破（当前收盘价高于前 period 日的最高收盘价）
-        price_condition = (latest_day['Close'] > max_close_pre_period)
+        price_condition = (latest_close > max_close_pre_period)
         
         if volume_condition and price_condition:
-            # 提取股票代码 (从文件名中获取)
-            stock_code = os.path.basename(file_path).split('.')[0]
-            # 返回符合条件的股票代码和最新收盘价
-            return {'code': stock_code, 'close': latest_day['Close']}
+            # 返回符合条件的股票代码、名称和最新收盘价
+            return {'code': stock_code, 'name': stock_name, 'close': latest_close}
             
     except Exception as e:
         # print(f"Error processing file {file_path}: {e}")
@@ -87,8 +102,19 @@ def analyze_stock(file_path):
 # --- 主执行函数 ---
 def main():
     print(f"--- 股票筛选脚本启动 @ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ---")
-    
-    # 1. 扫描所有数据文件
+
+    # 1. 加载股票名称并创建映射
+    try:
+        names_df = pd.read_csv(STOCK_NAMES_FILE, dtype={'代码': str})
+        names_df.rename(columns={'代码': 'code', '名称': 'name'}, inplace=True)
+        names_df['code'] = names_df['code'].astype(str)
+        # 创建代码到名称的映射字典，便于快速查找和类型检查
+        stock_names_map = names_df.set_index('code')['name'].to_dict()
+    except Exception as e:
+        print(f"Error loading stock names: {e}. Cannot perform name-based filtering.")
+        stock_names_map = {}
+
+    # 2. 扫描所有数据文件
     data_files = [os.path.join(STOCK_DATA_DIR, f) 
                   for f in os.listdir(STOCK_DATA_DIR) 
                   if f.endswith('.csv')]
@@ -99,11 +125,11 @@ def main():
 
     print(f"Found {len(data_files)} data files. Starting parallel processing...")
     
-    # 2. 并行处理文件
+    # 3. 并行处理文件
     results = []
-    # 使用 ThreadPoolExecutor 进行并行处理以加快速度
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        futures = [executor.submit(analyze_stock, file) for file in data_files]
+        # 传递 stock_names_map 给 analyze_stock
+        futures = [executor.submit(analyze_stock, file, stock_names_map) for file in data_files]
         for future in futures:
             result = future.result()
             if result:
@@ -112,32 +138,11 @@ def main():
     print(f"Parallel processing finished. Found {len(results)} stocks matching the criteria.")
 
     if not results:
-        print("No stocks matched the '后量过前量' and price > 5.0 criteria.")
+        print("No stocks matched the updated criteria.")
         return
 
-    # 3. 加载股票名称
-    try:
-        names_df = pd.read_csv(STOCK_NAMES_FILE, dtype={'code': str})
-        names_df.rename(columns={'代码': 'code', '名称': 'name'}, inplace=True)
-        # 确保 code 列是字符串类型
-        names_df['code'] = names_df['code'].astype(str)
-    except FileNotFoundError:
-        print(f"Warning: Stock names file '{STOCK_NAMES_FILE}' not found. Output will only contain codes.")
-        names_df = pd.DataFrame({'code': [], 'name': []})
-    except Exception as e:
-        print(f"Error loading stock names: {e}")
-        names_df = pd.DataFrame({'code': [], 'name': []})
-
-    # 4. 匹配名称并生成最终结果
-    results_df = pd.DataFrame(results)
-    
-    # 确保 code 列是字符串类型
-    results_df['code'] = results_df['code'].astype(str)
-    
-    # 合并 (左连接，保持筛选结果完整性)
-    final_df = pd.merge(results_df, names_df[['code', 'name']], on='code', how='left')
-    
-    # 整理输出列
+    # 4. 生成最终结果
+    final_df = pd.DataFrame(results)
     final_df = final_df[['code', 'name', 'close']]
     final_df.rename(columns={'code': '股票代码', 'name': '股票名称', 'close': '最新收盘价'}, inplace=True)
 
@@ -149,7 +154,6 @@ def main():
     output_dir = os.path.join(RESULTS_BASE_DIR, current_year, current_month)
     os.makedirs(output_dir, exist_ok=True)
     
-    # 文件名与脚本名一致并加上时间戳
     output_filename = f"{os.path.basename(__file__).replace('.py', '')}_{current_time}.csv"
     output_path = os.path.join(output_dir, output_filename)
     
@@ -158,4 +162,7 @@ def main():
     print(f"Successfully saved {len(final_df)} results to: {output_path}")
 
 if __name__ == '__main__':
+    # 为了在并行处理前就获取股票名称，我们对主函数进行了重构
+    # main()
+    # 确保主函数被执行
     main()
