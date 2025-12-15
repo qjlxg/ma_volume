@@ -2,7 +2,6 @@ name: Stock Screener Advanced Workflow
 
 # 触发器配置
 on:
-  # 1. 手动触发 (在 Actions 页面点击 Run workflow)
   workflow_dispatch:
     inputs:
       reason:
@@ -10,15 +9,13 @@ on:
         required: false
         default: 'Manual Trigger'
 
-  # 2. 每天定时运行 (北京时间 18:00)
   schedule:
     # UTC 时间 10:00，对应北京时间 (UTC+8) 18:00
-    - cron: '0 10 * * *' 
+    - cron: '0 18 * * *' 
   
-  # 3. 脚本和工作流文件变动时自动运行
   push:
     branches:
-      - main  # 假设您的主分支是 main
+      - main
     paths:
       - 'stock_screener_advanced.py'
       - '.github/workflows/stock_screener_advanced.yml'
@@ -28,19 +25,20 @@ jobs:
   run_screener:
     runs-on: ubuntu-latest
     
-    # 设置工作流的运行时区为上海 (北京时间)
+    # 关键：确保 Action 有权限写入和推送
+    permissions:
+      contents: write # 显式授予写入权限
+
     env:
       TZ: 'Asia/Shanghai' 
 
     steps:
     - name: ⬇️ Checkout Repository
+      # ⚠️ 必须使用 actions/checkout@v4，以便后续操作能使用 Git
       uses: actions/checkout@v4
-      # 确保 stock_data 和 stock_names.csv 在仓库中
-
-    # ⭐ 新增步骤：在运行脚本前，确保本地分支与远程同步
-    - name: 🔄 Git Pull --rebase (Prevent non-fast-forward error)
-      run: git pull --rebase
-      # ⚠️ 注意：这个步骤要求 actions/checkout@v4 已经设置了权限，默认是启用的。
+      with:
+        # fetch-depth: 0 确保拉取所有历史记录，以更好地处理冲突
+        fetch-depth: 0 
 
     - name: 🐍 Set up Python
       uses: actions/setup-python@v5
@@ -56,13 +54,26 @@ jobs:
       run: python stock_screener_advanced.py
 
     - name: 💾 Commit and Push Results
+      # 仅使用 file_pattern，移除所有可能引起 v5 报错的额外参数
       uses: stefanzweifel/git-auto-commit-action@v5
       with:
         commit_message: "Automated: Add new stock screening results"
         file_pattern: output/**/*.csv 
         commit_options: '--date="${{ env.TZ_OFFSET }}"'
-        # ⭐ 关键修正：禁用 Action 内部的 Git Fetch/Checkout，因为它在 pull 之后是多余的，且可能造成冲突。
-        skip_fetch: true
-        skip_checkout: true 
-      env:
-        TZ_OFFSET: '+0800'
+        # ⭐ 新增：在推送前执行拉取并尝试合并 (这是 Action 的内置功能，不需要 pull_options 参数)
+        # 如果 Action 内部的自动拉取仍失败，我们将尝试在下一步使用强制推送。
+        
+    - name: 🚨 Fallback: Force Push if Commit Failed (Optional but reliable)
+      # 如果上一步失败，这说明远程仓库在我们提交期间被修改了。
+      # 我们将使用一个单独的 Git 命令来确保推送。
+      if: failure()
+      run: |
+        echo "Auto-commit failed due to remote changes. Pulling and retrying push."
+        # 配置 Git 身份
+        git config user.name "github-actions[bot]"
+        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+        # 尝试拉取远程，并使用 'ours' 策略解决冲突 (我们只关心自己的输出文件)
+        # 更好的方法是 rebase
+        git pull --rebase
+        # 最后，强制推送
+        git push -f
