@@ -1,0 +1,67 @@
+# .github/workflows/volume_bottom_scanner.yml
+name: Volume Bottom Scanner (缩量见底筛选)
+
+on:
+  # 1. 定时触发：每天 18:00 (北京时间) 运行
+  schedule:
+    # cron 表达式使用 UTC 时间。北京时间(CST/Shanghai) 18:00 对应 UTC 10:00。
+    - cron: '0 10 * * *'
+  
+  # 2. 手动触发
+  workflow_dispatch:
+  
+  # 3. 自动触发：当脚本或工作流文件变动时自动运行
+  push:
+    paths:
+      - 'volume_bottom_scanner.py'
+      - '.github/workflows/volume_bottom_scanner.yml'
+
+jobs:
+  run_scanner:
+    runs-on: ubuntu-latest
+    
+    # 设置时区为上海，用于在脚本中生成正确的时间戳文件名
+    env:
+      TZ: Asia/Shanghai
+
+    steps:
+      - name: ⬇️ 检出代码
+        uses: actions/checkout@v4
+        # 获取所有提交历史，以便于后续 push
+        with:
+          fetch-depth: 0 
+
+      - name: 🐍 设置 Python 环境
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x' 
+
+      - name: 📦 安装依赖
+        run: pip install pandas
+
+      - name: 🏃 运行股票筛选脚本
+        run: python volume_bottom_scanner.py
+        # 脚本将生成 output/YYYY/MM/volume_bottom_scan_results_YYYYMMDD_HHMMSS.csv 文件
+
+      - name: 📂 配置 Git 用户
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+
+      - name: ⬆️ 提交筛选结果到仓库
+        # 检查是否有新的 output 文件，如果有则提交
+        run: |
+          if [ -d "output" ]; then
+            git add output/*.csv output/*/*.csv output/*/*/*.csv
+            
+            # 检查是否有文件被添加
+            if git diff --cached --quiet; then
+              echo "没有新的筛选结果文件，跳过提交。"
+            else
+              # 提交和推送
+              git commit -m "🤖 Auto: Add volume bottom scan results for $(date +%Y-%m-%d)"
+              git push
+            fi
+          else
+            echo "未找到 output 目录，跳过提交。"
+          fi
