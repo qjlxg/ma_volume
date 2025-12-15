@@ -59,6 +59,7 @@ jobs:
         file_pattern: output/**/*.csv 
         # 设置 Git commit 时间戳为上海时区
         commit_options: '--date="${{ env.TZ_OFFSET }}"'
+        pull_options: '--rebase'
       env:
         # 定义 UTC+8 offset 供 commit_options 使用
         TZ_OFFSET: '+0800'
