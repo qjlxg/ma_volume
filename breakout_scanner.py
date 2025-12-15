@@ -104,7 +104,7 @@ def check_breakout_pattern(file_path):
         price_breakout = (latest['Close'] > latest['MA_Short']) and (latest['Close'] > latest['MA_Long'])
         
         # b) 量能确认：最新成交量高于过去5天平均成交量的1.2倍，确认突破的有效性
-        volume_confirm = latest['Volume'] > 1.2 * latest['Volume_Avg'] 
+        volume_confirm = latest['Volume'] > 1.5 * latest['Volume_Avg'] 
 
         # c) 从底部反弹：最新价高于N日内的最低价，确保不是在高位震荡
         bounced_from_low = latest['Close'] > latest['N_Day_Low'] 
