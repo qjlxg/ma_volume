@@ -8,11 +8,15 @@ from concurrent.futures import ThreadPoolExecutor
 STOCK_DATA_DIR = 'stock_data'
 STOCK_NAMES_FILE = 'stock_names.csv'
 OUTPUT_DIR = 'filtered_results'
-MIN_CLOSE_PRICE = 5.0
 
-# ⚠️ 自动匹配关键词列表：脚本将尝试在 CSV 文件头中找到以下任意一个列名
-DATE_KEYWORDS = ['Date', '日期', '交易日期', 'TradeDate', 'TDATE', 'time']
-CLOSE_KEYWORDS = ['Close', '收盘价', 'close', '收盘', 'Adj Close', 'PX_LAST']
+# 筛选条件
+MIN_CLOSE_PRICE = 5.0      # 最新收盘价最低限制
+MIN_TURNOVER_RATE = 0.5    # 最小换手率（百分比）限制，用于减少结果数量，确保活跃度
+
+# ⚠️ 自动匹配关键词列表：根据您上传的CSV片段 (日期, 收盘, 换手率)
+DATE_KEYWORDS = ['日期', 'Date', '交易日期', 'TradeDate', 'TDATE', 'time']
+CLOSE_KEYWORDS = ['收盘', 'Close', 'close', 'Adj Close', 'PX_LAST']
+TURNOVER_KEYWORDS = ['换手率', 'TurnoverRate', 'Turnover', '换手']
 
 
 def find_column_name(df_columns, keywords):
@@ -22,7 +26,7 @@ def find_column_name(df_columns, keywords):
     """
     lower_cols = [col.lower() for col in df_columns]
     for keyword in keywords:
-        # 尝试完全匹配
+        # 尝试精确匹配
         if keyword in df_columns:
             return keyword
         # 尝试忽略大小写匹配
@@ -35,7 +39,7 @@ def find_column_name(df_columns, keywords):
 def process_single_file(file_path):
     """
     处理单个股票历史数据文件，筛选最新数据并检查条件。
-    返回 (股票代码, 最新收盘价) 或 None。
+    返回 (股票代码, 最新收盘价, 最新换手率) 或 None。
     """
     stock_code = os.path.basename(file_path).split('.')[0]
     
@@ -43,32 +47,37 @@ def process_single_file(file_path):
         # 1. 尝试读取整个文件
         df = pd.read_csv(file_path)
 
-        # 2. 确保数据不为空
-        if df.empty:
-            print(f"警告: 文件 {stock_code}.csv 为空。")
-            return None
-
-        # 3. 自动匹配日期和收盘价列
+        # 2. 自动匹配日期、收盘价和换手率列
         date_col = find_column_name(df.columns, DATE_KEYWORDS)
         close_col = find_column_name(df.columns, CLOSE_KEYWORDS)
+        turnover_col = find_column_name(df.columns, TURNOVER_KEYWORDS)
         
-        if not date_col or not close_col:
+        if not date_col or not close_col or not turnover_col:
             missing_part = []
-            if not date_col:
-                missing_part.append(f"日期列 (尝试匹配: {', '.join(DATE_KEYWORDS)})")
-            if not close_col:
-                missing_part.append(f"收盘价列 (尝试匹配: {', '.join(CLOSE_KEYWORDS)})")
+            if not date_col: missing_part.append("日期")
+            if not close_col: missing_part.append("收盘价")
+            if not turnover_col: missing_part.append("换手率")
                 
-            print(f"⚠️ 警告: 文件 {stock_code}.csv 无法自动识别 {', '.join(missing_part)}。")
+            print(f"⚠️ 警告: 文件 {stock_code}.csv 缺少所需列: {', '.join(missing_part)}。")
             print(f"    该文件的前几列为: {list(df.columns[:5])}。请检查并更新脚本中的关键词列表。")
             return None
 
-        # 4. 找到最新的收盘价（DataFrame的最后一行）
-        latest_close = df[close_col].iloc[-1]
+        # 3. 找到最新的收盘价和换手率
+        # 确保收盘价和换手率是数值类型，防止因数据清洗不干净而报错
+        df[close_col] = pd.to_numeric(df[close_col], errors='coerce')
+        df[turnover_col] = pd.to_numeric(df[turnover_col], errors='coerce')
+        df.dropna(subset=[close_col, turnover_col], inplace=True) # 移除无法转换为数字的行
 
-        # 5. 筛选条件：最新收盘价不能低于 5.0 元
-        if latest_close >= MIN_CLOSE_PRICE:
-            return stock_code, latest_close
+        if df.empty:
+            return None
+
+        latest_close = df[close_col].iloc[-1]
+        latest_turnover = df[turnover_col].iloc[-1]
+
+        # 4. 筛选条件：价格 AND 活跃度 (换手率)
+        if latest_close >= MIN_CLOSE_PRICE and latest_turnover >= MIN_TURNOVER_RATE:
+            # 返回三个值
+            return stock_code, latest_close, latest_turnover
         
         return None
 
@@ -79,17 +88,14 @@ def process_single_file(file_path):
 def main():
     """主函数，执行文件扫描、并行处理和结果保存。"""
     
-    # 1. 获取所有股票数据文件路径
     all_files = glob.glob(os.path.join(STOCK_DATA_DIR, '*.csv'))
     if not all_files:
         print(f"错误: 在目录 {STOCK_DATA_DIR} 中未找到任何CSV文件。请确保数据已上传。")
         return
 
-    # 2. 并行处理所有文件以加快速度
     print(f"开始处理 {len(all_files)} 个股票文件...")
     
     results = []
-    # 使用 ThreadPoolExecutor 进行并行处理
     max_workers = os.cpu_count() * 2 or 8 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         processed_data = executor.map(process_single_file, all_files)
@@ -99,28 +105,36 @@ def main():
         print("未筛选出符合条件的股票。")
         return
 
-    # 3. 将筛选结果转换为 DataFrame
-    filtered_df = pd.DataFrame(results, columns=['Code', 'Latest_Close'])
+    # 3. 将筛选结果转换为 DataFrame (注意：现在有三列)
+    filtered_df = pd.DataFrame(results, columns=['Code', 'Latest_Close', 'Latest_Turnover'])
     
-    # 4. 读取股票名称匹配文件
+    # 4. 读取股票名称匹配文件 (解决匹配失败问题)
     try:
-        names_df = pd.read_csv(STOCK_NAMES_FILE, dtype={'Code': str})
-        if 'Code' not in names_df.columns or 'Name' not in names_df.columns:
-             print(f"错误: {STOCK_NAMES_FILE} 必须包含 'Code' 和 'Name' 两列。")
-             final_output_df = filtered_df
-        else:
-            final_output_df = pd.merge(
-                filtered_df,
-                names_df[['Code', 'Name']],
-                on='Code',
-                how='left'
-            )
-            final_output_df = final_output_df[['Code', 'Name', 'Latest_Close']]
-            final_output_df['Name'] = final_output_df['Name'].fillna('名称缺失')
+        # 明确读取 'code' 和 'name' 列
+        names_df = pd.read_csv(STOCK_NAMES_FILE, dtype={'code': str}, usecols=['code', 'name'])
+        
+        # ⚠️ 关键修改：将 names_df 中的 'code' 和 'name' 列重命名为 'Code' 和 'Name' 以便与 filtered_df 匹配
+        names_df = names_df.rename(columns={'code': 'Code', 'name': 'Name'})
+        
+        # 5. 合并筛选结果和股票名称
+        final_output_df = pd.merge(
+            filtered_df,
+            names_df,
+            on='Code',
+            how='left'
+        )
+        
+        # ⚠️ 输出列顺序：代码、名称、收盘价、换手率
+        final_output_df = final_output_df[['Code', 'Name', 'Latest_Close', 'Latest_Turnover']]
+        final_output_df['Name'] = final_output_df['Name'].fillna('名称缺失')
+        
     except FileNotFoundError:
         print(f"错误: 股票名称文件 {STOCK_NAMES_FILE} 未找到，仅输出代码和价格。")
         final_output_df = filtered_df
-    
+    except ValueError:
+        print(f"错误: {STOCK_NAMES_FILE} 文件格式或列名不正确，无法匹配。")
+        final_output_df = filtered_df
+
     print(f"筛选出 {len(final_output_df)} 支符合条件的股票。")
 
     # 6. 生成带时间戳的文件名和目录
