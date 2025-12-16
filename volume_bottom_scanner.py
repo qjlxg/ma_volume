@@ -11,11 +11,11 @@ import time
 STOCK_DATA_DIR = 'stock_data'
 STOCK_NAMES_FILE = 'stock_names.csv'
 PRICE_MIN = 5.0          # 【修改】股价筛选：最新收盘价不低于 5.0 元 
-PRICE_MAX = 20.0         # 【新增】股价筛选：最新收盘价不高于 20.0 元
+PRICE_MAX = 15.0         # 【新增】股价筛选：最新收盘价不高于 15.0 元
 VOLUME_PERIOD = 120      # 缩量周期：计算天量时的历史周期 N
 PRICE_LOW_PERIOD = 40    # 低位周期：价格低位确认周期 M
-VOLUME_SHRINK_RATIO = 0.05  # 【沿用】缩量比例：最新成交量 <= 天量的 5% 
-PRICE_LOW_RANGE_RATIO = 0.05 # 【沿用】低位范围：要求最新价在低位周期最低价的 5% 范围内
+VOLUME_SHRINK_RATIO = 0.03  # 【沿用】缩量比例：最新成交量 <= 天量的 3% 
+PRICE_LOW_RANGE_RATIO = 0.03 # 【沿用】低位范围：要求最新价在低位周期最低价的 3% 范围内
 
 # --- 2. 数据列名映射 ---
 DATE_COL = '日期'
