@@ -1,4 +1,4 @@
-name: 下影线反转
+name: lower_shadow_reversal
 
 on:
   # 1. 手动触发
@@ -14,7 +14,7 @@ on:
     
 
   schedule:
-    - cron: '15 15 * * *'
+    - cron: '36 15 * * *'
 
 # 设置运行环境为上海时区，影响 runner 的日志和系统时间
 env:
