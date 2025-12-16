@@ -17,7 +17,7 @@ VOLUME_AVG_DAYS = 5 # 成交量平均天数
 
 # 价格限制
 MIN_CLOSE_PRICE = 5.0 
-MAX_CLOSE_PRICE = 20.0 # 新增：最新收盘价不高于 20.0 元
+MAX_CLOSE_PRICE = 15.0 # 新增：最新收盘价不高于 15.0 元
 
 # 列名映射字典 (将您的中文列名映射到脚本使用的英文列名)
 COLUMN_MAP = {
