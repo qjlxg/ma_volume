@@ -8,7 +8,7 @@ from multiprocessing import Pool, cpu_count
 STOCK_DATA_DIR = 'stock_data'
 STOCK_NAMES_FILE = 'stock_names.csv'
 MIN_CLOSING_PRICE = 5.0
-MAX_CLOSING_PRICE = 20.0  # 收盘价上限
+MAX_CLOSING_PRICE = 15.0  # 收盘价上限
 MAX_PULLBACK_PERCENT = 0.15  # 回调幅度上限 15%
 MAX_PULLBACK_DAYS = 30 # 回调时间上限 30 天
 
