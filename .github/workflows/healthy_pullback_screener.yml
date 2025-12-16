@@ -1,24 +1,14 @@
 name: Healthy Pullback Screener
 
-# 定义触发器
 on:
-  # 1. 定时触发：每天 18:00 (北京时间/上海时区)
   schedule:
-    # cron表达式基于UTC时间，北京时间18:00 (UTC+8) 相当于 UTC 10:00
-    - cron: '0 15 * * *' 
+    - cron: '0 15 * * *'
   
-  # 2. 手动触发
   workflow_dispatch:
-    inputs:
-      reason:
-        description: '手动运行的原因 (可选)'
-        required: false
-        default: 'Manual trigger'
-        
-  # 3. 脚本或工作流文件变动时自动运行
+  
   push:
     branches:
-      - main # 假设你的主分支是 main
+      - main
     paths:
       - 'healthy_pullback_screener.py'
       - '.github/workflows/healthy_pullback_screener.yml'
@@ -27,10 +17,12 @@ jobs:
   screen_stocks:
     runs-on: ubuntu-latest
     
+    env:
+      TZ: Asia/Shanghai
+
     steps:
       - name: ⬇️ 检出代码
         uses: actions/checkout@v4
-        # 需要拉取所有历史记录，以便脚本能够扫描 stock_data
         with:
           fetch-depth: 0
 
@@ -42,27 +34,18 @@ jobs:
       - name: 📦 安装依赖
         run: pip install pandas
 
-      # 设置时区为上海，确保脚本中的 datetime.now() 与北京时间一致
-      - name: 🌍 设置时区为上海 (UTC+8)
-        run: export TZ='Asia/Shanghai'
-
       - name: ⚙️ 运行股票筛选脚本
         run: python healthy_pullback_screener.py
 
       - name: ⬆️ 推送结果文件到仓库
-        # 结果文件位于 /年月的子目录中，需要将整个目录添加并推送
-        # GITHUB_TOKEN 是 Actions 自动提供的权限
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
           
-          # 查找今天生成的结果文件（位于年月目录）
           OUTPUT_DIR=$(date +%Y%m)
           
-          # 添加生成的年月目录及其中的所有文件
           git add $OUTPUT_DIR/*.csv
           
-          # 检查是否有文件变动（即是否有新结果生成）
           if git diff --cached --quiet; then
             echo "No new results to commit."
           else
