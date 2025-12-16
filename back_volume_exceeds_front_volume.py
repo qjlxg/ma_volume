@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 STOCK_DATA_DIR = 'stock_data'
 STOCK_NAMES_FILE = 'stock_names.csv'
 MIN_CLOSE_PRICE = 5.0   # 最新收盘价最低限制
-MAX_CLOSE_PRICE = 15.0  # 最新收盘价最高限制
+MAX_CLOSE_PRICE = 20.0  # 最新收盘价最高限制
 RESULTS_BASE_DIR = '筛选结果'
 MAX_WORKERS = os.cpu_count() * 2 if os.cpu_count() else 4
 
