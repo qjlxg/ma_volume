@@ -12,7 +12,7 @@ on:
   
   # 3. 每天定时触发 (北京时间/上海时间 18:00)
   schedule:
-    - cron: '0 15 * * *'
+    - cron: '10 14 * * *'
 
 jobs:
   run_screener:
