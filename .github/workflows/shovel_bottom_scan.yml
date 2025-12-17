@@ -21,11 +21,9 @@ on:
       - 'shovel_bottom_scan.py'  # 脚本变动
       - '.github/workflows/shovel_bottom_scan.yml' # 工作流变动
 
-  # 3. 定时触发 (每天 18:00 北京时间/上海时区)
-  # Cron 表达式: 分 时 天 月 周
-  # 0 10 * * * --> UTC 时间 10:00，相当于北京时间 18:00 (UTC+8)
+
   schedule:
-    - cron: '0 15 * * *'
+    - cron: '13 13 * * *'
 
 jobs:
   run_and_commit_results:
